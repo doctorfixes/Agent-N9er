@@ -128,7 +128,13 @@ app.add_middleware(
 async def health():
     async with _agents_lock:
         count = len(registered_agents)
-    return {"ok": 1, "service": "orchestrator", "registered_agents": count}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM agents")
+            db_count = (await cursor.fetchone())[0]
+        return {"ok": 1, "service": "orchestrator", "registered_agents": count, "db_agents": db_count}
+    except Exception:
+        return {"ok": 0, "service": "orchestrator", "error": "db_unreachable"}
 
 
 @app.post("/agents/register")

@@ -392,8 +392,8 @@ AGENT_SPECIALIZATIONS = {
 
 
 def classify_task(objective: str, inputs: Optional[dict] = None) -> dict:
-    text = objective.lower()
-    if inputs:
+    text = str(objective).lower()
+    if inputs and isinstance(inputs, dict):
         text += " " + " ".join(str(v).lower() for v in inputs.values())
 
     best_category = TaskCategory.UNCATEGORIZED

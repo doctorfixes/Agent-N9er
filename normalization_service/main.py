@@ -41,7 +41,7 @@ async def health():
 @app.post("/normalize")
 async def normalize(task: dict):
     task_id = str(uuid.uuid4())
-    objective = task.get("objective", "")
+    objective = str(task.get("objective", ""))
     inputs = task.get("inputs", {})
     source = task.get("source", "manual")
 

@@ -82,7 +82,13 @@ app.add_middleware(
 async def health():
     async with _rules_lock:
         count = len(rules)
-    return {"ok": 1, "service": "recurring", "rule_count": count}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM rules")
+            db_count = (await cursor.fetchone())[0]
+        return {"ok": 1, "service": "recurring", "rule_count": count, "db_rules": db_count}
+    except Exception:
+        return {"ok": 0, "service": "recurring", "error": "db_unreachable"}
 
 
 @app.post("/rules")
