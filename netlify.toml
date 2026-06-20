@@ -1,0 +1,17 @@
+[build]
+  base = "dashboard/"
+  command = "npm install && npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Backend service URLs — set these in Netlify UI (Site > Environment variables)
+# ORCHESTRATOR_URL = https://orchestrator-production.up.railway.app
+# MARKETPLACE_URL = https://marketplace-production.up.railway.app
+# REPUTATION_URL  = https://reputation-production.up.railway.app
+# SIMULATION_URL  = https://simulation-production.up.railway.app
