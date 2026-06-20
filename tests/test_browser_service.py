@@ -1,3 +1,7 @@
+import hashlib
+import hmac
+import json
+import time
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from httpx import ASGITransport, AsyncClient
@@ -202,3 +206,72 @@ async def test_generic_webhook(client):
 async def test_generic_webhook_missing_objective(client):
     resp = await client.post("/webhooks/generic", json={"data": "nothing"})
     assert resp.status_code == 422
+
+
+# --- Slack signature verification tests ---
+
+async def test_slack_rejects_invalid_signature(client):
+    original_secret = browser.SLACK_SIGNING_SECRET
+    try:
+        browser.SLACK_SIGNING_SECRET = "test_secret_123"
+        resp = await client.post(
+            "/webhooks/slack",
+            content=json.dumps({"event": {"type": "message", "text": "task: test"}}),
+            headers={
+                "Content-Type": "application/json",
+                "X-Slack-Request-Timestamp": str(int(time.time())),
+                "X-Slack-Signature": "v0=invalid_signature",
+            },
+        )
+        assert resp.status_code == 401
+    finally:
+        browser.SLACK_SIGNING_SECRET = original_secret
+
+
+async def test_slack_accepts_valid_signature(client):
+    original_secret = browser.SLACK_SIGNING_SECRET
+    try:
+        secret = "test_secret_456"
+        browser.SLACK_SIGNING_SECRET = secret
+        body = json.dumps({"type": "url_verification", "challenge": "abc"})
+        timestamp = str(int(time.time()))
+        sig_basestring = f"v0:{timestamp}:{body}"
+        signature = "v0=" + hmac.new(
+            secret.encode(), sig_basestring.encode(), hashlib.sha256
+        ).hexdigest()
+
+        with _mock_orchestrator():
+            resp = await client.post(
+                "/webhooks/slack",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Slack-Request-Timestamp": timestamp,
+                    "X-Slack-Signature": signature,
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.json()["challenge"] == "abc"
+    finally:
+        browser.SLACK_SIGNING_SECRET = original_secret
+
+
+# --- GitHub signature verification tests ---
+
+async def test_github_rejects_invalid_signature(client):
+    original_secret = browser.GITHUB_WEBHOOK_SECRET
+    try:
+        browser.GITHUB_WEBHOOK_SECRET = "gh_secret_123"
+        body = json.dumps({"action": "opened", "issue": {"title": "test"}})
+        resp = await client.post(
+            "/webhooks/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "issues",
+                "X-Hub-Signature-256": "sha256=invalid",
+            },
+        )
+        assert resp.status_code == 401
+    finally:
+        browser.GITHUB_WEBHOOK_SECRET = original_secret

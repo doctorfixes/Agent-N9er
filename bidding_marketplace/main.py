@@ -5,12 +5,33 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("marketplace")
 
 DB_PATH = os.getenv("DB_PATH", "/data/marketplace.db")
+
+
+class PublishRequest(BaseModel):
+    id: str
+    objective: str = ""
+    priority_score: float = 0.0
+    inputs: dict = Field(default_factory=dict)
+    source: str = "manual"
+
+
+class BidRequest(BaseModel):
+    task_id: str
+    agent_id: str
+    price: float = Field(default=0.0, ge=0)
+    eta_minutes: int = Field(default=0, ge=0)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class CompleteRequest(BaseModel):
+    success: bool = False
 
 
 async def get_db():
@@ -43,9 +64,14 @@ async def init_db():
                 eta_minutes INTEGER,
                 confidence REAL,
                 submitted_at TEXT,
-                FOREIGN KEY (task_id) REFERENCES tasks(id)
+                FOREIGN KEY (task_id) REFERENCES tasks(id),
+                UNIQUE(task_id, agent_id)
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_published ON tasks(published_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_bids_task ON bids(task_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_bids_agent ON bids(agent_id)")
         await db.commit()
     logger.info("Marketplace database initialized at %s", DB_PATH)
 
@@ -61,42 +87,51 @@ app = FastAPI(title="Verixio Bidding Marketplace", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM tasks")
-        count = (await cursor.fetchone())[0]
-    return {"ok": 1, "service": "marketplace", "task_count": count}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM tasks")
+            count = (await cursor.fetchone())[0]
+        return {"ok": 1, "service": "marketplace", "task_count": count}
+    except Exception:
+        return {"ok": 0, "service": "marketplace", "error": "db_unreachable"}
 
 
 @app.post("/publish")
-async def publish(task: dict):
-    task_id = task.get("id")
-    if not task_id:
-        raise HTTPException(status_code=422, detail="Missing task id")
-
+async def publish(task: PublishRequest):
     now = datetime.now(timezone.utc).isoformat()
     db = await get_db()
     try:
         await db.execute(
             "INSERT OR REPLACE INTO tasks (id, objective, priority_score, status, inputs, source, published_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (task_id, task.get("objective", ""), task.get("priority_score", 0),
-             "open", json.dumps(task.get("inputs", {})), task.get("source", "manual"), now)
+            (task.id, task.objective, task.priority_score, "open",
+             json.dumps(task.inputs), task.source, now)
         )
         await db.commit()
     finally:
         await db.close()
 
-    logger.info("Published task %s", task_id)
-    return {"ok": 1, "task_id": task_id}
+    logger.info("Published task %s", task.id)
+    return {"ok": 1, "task_id": task.id}
 
 
 @app.get("/feed")
-async def feed(status: str = None):
+async def feed(
+    status: str = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
     db = await get_db()
     try:
         if status:
-            cursor = await db.execute("SELECT * FROM tasks WHERE status = ? ORDER BY published_at DESC", (status,))
+            cursor = await db.execute(
+                "SELECT * FROM tasks WHERE status = ? ORDER BY published_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
+            )
         else:
-            cursor = await db.execute("SELECT * FROM tasks ORDER BY published_at DESC")
+            cursor = await db.execute(
+                "SELECT * FROM tasks ORDER BY published_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
         rows = await cursor.fetchall()
         return [_task_from_row(r) for r in rows]
     finally:
@@ -104,30 +139,23 @@ async def feed(status: str = None):
 
 
 @app.post("/bid")
-async def submit_bid(bid: dict):
-    task_id = bid.get("task_id")
-    agent_id = bid.get("agent_id")
-    if not task_id or not agent_id:
-        raise HTTPException(status_code=422, detail="Missing task_id or agent_id")
-
+async def submit_bid(bid: BidRequest):
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
+        cursor = await db.execute("SELECT id FROM tasks WHERE id = ?", (bid.task_id,))
         if not await cursor.fetchone():
             raise HTTPException(status_code=404, detail="Task not found")
 
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "INSERT INTO bids (task_id, agent_id, price, eta_minutes, confidence, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, agent_id, bid.get("price", 0), bid.get("eta_minutes", 0),
-             bid.get("confidence", 0), now)
+            "INSERT OR REPLACE INTO bids (task_id, agent_id, price, eta_minutes, confidence, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (bid.task_id, bid.agent_id, bid.price, bid.eta_minutes, bid.confidence, now)
         )
         await db.commit()
     finally:
         await db.close()
 
-    logger.info("Bid from agent %s on task %s (confidence=%.2f)",
-                agent_id, task_id, bid.get("confidence", 0))
+    logger.info("Bid from agent %s on task %s (confidence=%.2f)", bid.agent_id, bid.task_id, bid.confidence)
     return {"ok": 1}
 
 
@@ -172,8 +200,8 @@ async def award_task(task_id: str):
 
 
 @app.post("/complete/{task_id}")
-async def complete_task(task_id: str, result: dict):
-    status = "completed" if result.get("success") else "failed"
+async def complete_task(task_id: str, result: CompleteRequest):
+    status = "completed" if result.success else "failed"
     db = await get_db()
     try:
         await db.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))

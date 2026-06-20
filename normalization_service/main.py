@@ -2,11 +2,18 @@ import uuid
 import logging
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("normalization")
 
 app = FastAPI(title="Verixio Normalization Service")
+
+
+class NormalizeRequest(BaseModel):
+    objective: str = ""
+    inputs: dict = {}
+    source: str = "manual"
 
 
 @app.get("/health")

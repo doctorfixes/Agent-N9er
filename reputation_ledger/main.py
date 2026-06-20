@@ -4,11 +4,22 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("reputation")
 
 DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
+
+
+class RegisterRequest(BaseModel):
+    agent_id: str
+    profile: str = ""
+
+
+class UpdateRequest(BaseModel):
+    agent_id: str
+    success: bool
 
 
 async def get_db():
@@ -29,6 +40,7 @@ async def init_db():
                 score REAL DEFAULT 0.5
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agents_score ON agents(score)")
         await db.commit()
     logger.info("Reputation database initialized at %s", DB_PATH)
 
@@ -44,42 +56,36 @@ app = FastAPI(title="Verixio Reputation Ledger", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM agents")
-        count = (await cursor.fetchone())[0]
-    return {"ok": 1, "service": "reputation", "agent_count": count}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM agents")
+            count = (await cursor.fetchone())[0]
+        return {"ok": 1, "service": "reputation", "agent_count": count}
+    except Exception:
+        return {"ok": 0, "service": "reputation", "error": "db_unreachable"}
 
 
 @app.post("/register")
-async def register(agent: dict):
-    agent_id = agent.get("agent_id")
-    profile = agent.get("profile", "")
-    if not agent_id:
-        raise HTTPException(status_code=422, detail="Missing agent_id")
-
+async def register(agent: RegisterRequest):
     db = await get_db()
     try:
         await db.execute(
             "INSERT OR IGNORE INTO agents (agent_id, profile) VALUES (?, ?)",
-            (agent_id, profile)
+            (agent.agent_id, agent.profile)
         )
         await db.commit()
     finally:
         await db.close()
 
-    logger.info("Registered agent %s (%s)", agent_id, profile)
-    return {"ok": 1, "agent_id": agent_id}
+    logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
+    return {"ok": 1, "agent_id": agent.agent_id}
 
 
 @app.post("/update")
-async def update(record: dict):
-    agent_id = record.get("agent_id")
-    if not agent_id:
-        raise HTTPException(status_code=422, detail="Missing agent_id")
-
+async def update(record: UpdateRequest):
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,))
+        cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (record.agent_id,))
         row = await cursor.fetchone()
 
         if row:
@@ -89,7 +95,7 @@ async def update(record: dict):
         else:
             success, fail, score = 0, 0, 0.5
 
-        if record.get("success"):
+        if record.success:
             success += 1
             score = min(1.0, score + 0.01)
         else:
@@ -98,15 +104,15 @@ async def update(record: dict):
 
         await db.execute(
             "INSERT OR REPLACE INTO agents (agent_id, profile, success, fail, score) VALUES (?, ?, ?, ?, ?)",
-            (agent_id, row["profile"] if row else "", success, fail, round(score, 4))
+            (record.agent_id, row["profile"] if row else "", success, fail, round(score, 4))
         )
         await db.commit()
     finally:
         await db.close()
 
     entry = {"success": success, "fail": fail, "score": round(score, 4)}
-    logger.info("Agent %s reputation: %.2f (W:%d L:%d)", agent_id, score, success, fail)
-    return {"ok": 1, "agent_id": agent_id, "reputation": entry}
+    logger.info("Agent %s reputation: %.2f (W:%d L:%d)", record.agent_id, score, success, fail)
+    return {"ok": 1, "agent_id": record.agent_id, "reputation": entry}
 
 
 @app.get("/ledger")

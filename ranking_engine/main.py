@@ -1,8 +1,9 @@
 import logging
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("ranking")
 
 app = FastAPI(title="Verixio Ranking Engine")

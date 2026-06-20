@@ -81,3 +81,46 @@ async def test_complete_task(client):
 async def test_health_endpoint(client):
     resp = await client.get("/health")
     assert resp.json()["ok"] == 1
+
+
+# --- Pydantic validation tests ---
+
+async def test_publish_missing_id_returns_422(client):
+    resp = await client.post("/publish", json={"objective": "no id"})
+    assert resp.status_code == 422
+
+
+async def test_bid_invalid_confidence_returns_422(client):
+    await client.post("/publish", json={"id": "tv1", "objective": "x"})
+    resp = await client.post("/bid", json={"task_id": "tv1", "agent_id": "a1", "confidence": 1.5})
+    assert resp.status_code == 422
+
+
+async def test_bid_negative_price_returns_422(client):
+    await client.post("/publish", json={"id": "tv2", "objective": "x"})
+    resp = await client.post("/bid", json={"task_id": "tv2", "agent_id": "a1", "price": -1.0})
+    assert resp.status_code == 422
+
+
+# --- Pagination tests ---
+
+async def test_feed_pagination(client):
+    for i in range(5):
+        await client.post("/publish", json={"id": f"pg{i}", "objective": f"task {i}"})
+    feed = (await client.get("/feed", params={"limit": 2})).json()
+    assert len(feed) == 2
+    feed2 = (await client.get("/feed", params={"limit": 2, "offset": 2})).json()
+    assert len(feed2) == 2
+    assert feed[0]["id"] != feed2[0]["id"]
+
+
+# --- Unique bid constraint ---
+
+async def test_duplicate_bid_replaces(client):
+    await client.post("/publish", json={"id": "ub1", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ub1", "agent_id": "a1", "confidence": 0.5})
+    await client.post("/bid", json={"task_id": "ub1", "agent_id": "a1", "confidence": 0.9})
+    bids = (await client.get("/bids/ub1")).json()
+    agent_bids = [b for b in bids if b["agent_id"] == "a1"]
+    assert len(agent_bids) == 1
+    assert agent_bids[0]["confidence"] == 0.9

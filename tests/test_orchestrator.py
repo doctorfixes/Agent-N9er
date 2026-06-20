@@ -112,3 +112,19 @@ async def test_list_agents(client):
     orch.registered_agents["a1"] = {"agent_id": "a1", "profile": "speed"}
     resp = await client.get("/agents")
     assert "a1" in resp.json()
+
+
+# --- Pydantic validation tests ---
+
+async def test_register_agent_missing_id_returns_422(client):
+    resp = await client.post("/agents/register", json={"profile": "speed"})
+    assert resp.status_code == 422
+
+
+async def test_register_agent_uses_defaults(client):
+    mock_client, _, _ = _mock_pipeline()
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/agents/register", json={"agent_id": "def1"})
+    data = orch.registered_agents["def1"]
+    assert data["profile"] == "unknown"
+    assert data["confidence"] == 0.5

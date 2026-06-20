@@ -63,3 +63,27 @@ async def test_history_filter_by_agent(client):
 async def test_health_endpoint(client):
     resp = await client.get("/health")
     assert resp.json()["ok"] == 1
+
+
+# --- Pydantic validation tests ---
+
+async def test_execute_invalid_confidence_returns_422(client):
+    resp = await client.post("/execute", json={"task_id": "t1", "agent_id": "a1", "confidence": 2.0})
+    assert resp.status_code == 422
+
+
+async def test_execute_negative_confidence_returns_422(client):
+    resp = await client.post("/execute", json={"task_id": "t1", "agent_id": "a1", "confidence": -0.5})
+    assert resp.status_code == 422
+
+
+# --- Pagination tests ---
+
+async def test_history_pagination(client):
+    with _mock_reputation():
+        for i in range(5):
+            await client.post("/execute", json={"task_id": f"pg{i}", "agent_id": "a1", "confidence": 0.9})
+    history = (await client.get("/history", params={"limit": 2})).json()
+    assert len(history) == 2
+    history2 = (await client.get("/history", params={"limit": 2, "offset": 2})).json()
+    assert len(history2) == 2

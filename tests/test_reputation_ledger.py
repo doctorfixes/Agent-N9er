@@ -76,3 +76,15 @@ async def test_update_missing_agent_id_returns_422(client):
 async def test_health_endpoint(client):
     resp = await client.get("/health")
     assert resp.json()["ok"] == 1
+
+
+# --- Pydantic validation tests ---
+
+async def test_register_missing_agent_id_returns_422(client):
+    resp = await client.post("/register", json={"profile": "speed"})
+    assert resp.status_code == 422
+
+
+async def test_update_missing_success_returns_422(client):
+    resp = await client.post("/update", json={"agent_id": "x1"})
+    assert resp.status_code == 422

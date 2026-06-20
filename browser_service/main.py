@@ -1,12 +1,14 @@
 import os
+import time
 import logging
 import hashlib
 import hmac
 
 from fastapi import FastAPI, HTTPException, Request, Header
+from pydantic import BaseModel
 import httpx
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("browser_service")
 
 app = FastAPI(title="Verixio Browser Service")
@@ -16,6 +18,14 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 
 active_watchers = set()
+
+
+class GenericWebhookRequest(BaseModel):
+    objective: str = None
+    title: str = None
+    message: str = None
+    source: str = "webhook"
+    inputs: dict = {}
 
 
 @app.get("/health")
@@ -52,16 +62,31 @@ async def deactivate_watcher(name: str):
 
 
 async def _forward_to_pipeline(task: dict):
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task)
-            resp.raise_for_status()
-            result = resp.json()
-            logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
-            return result
-    except httpx.RequestError as e:
-        logger.error("Failed to forward to pipeline: %s", e)
-        raise HTTPException(status_code=503, detail="Orchestrator unreachable")
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task)
+                resp.raise_for_status()
+                result = resp.json()
+                logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
+                return result
+        except httpx.RequestError as e:
+            if attempt == 2:
+                logger.error("Failed to forward to pipeline after 3 retries: %s", e)
+                raise HTTPException(status_code=503, detail="Orchestrator unreachable")
+            logger.warning("Retry %d forwarding to pipeline: %s", attempt + 1, e)
+
+
+def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
+    if not SLACK_SIGNING_SECRET:
+        return True
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+    sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
+    expected = "v0=" + hmac.new(
+        SLACK_SIGNING_SECRET.encode(), sig_basestring.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 
 # --- GitHub Webhook ---
@@ -145,7 +170,17 @@ async def github_webhook(
 # --- Slack Webhook ---
 
 @app.post("/webhooks/slack")
-async def slack_webhook(request: Request):
+async def slack_webhook(
+    request: Request,
+    x_slack_request_timestamp: str = Header(None, alias="X-Slack-Request-Timestamp"),
+    x_slack_signature: str = Header(None, alias="X-Slack-Signature"),
+):
+    body = await request.body()
+
+    if SLACK_SIGNING_SECRET and x_slack_request_timestamp and x_slack_signature:
+        if not _verify_slack_signature(body, x_slack_request_timestamp, x_slack_signature):
+            raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
     payload = await request.json()
 
     if payload.get("type") == "url_verification":

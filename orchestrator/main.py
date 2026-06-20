@@ -3,9 +3,10 @@ import asyncio
 import logging
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import httpx
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
 
 NORMALIZATION_URL = os.getenv("NORMALIZATION_URL", "http://localhost:8100")
@@ -15,9 +16,41 @@ EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 RECURRING_URL = os.getenv("RECURRING_URL", "http://localhost:8600")
 
+MAX_RETRIES = 3
+RETRY_BACKOFF = 0.3
+
 app = FastAPI(title="Verixio Orchestrator")
 
 registered_agents = {}
+
+
+class AgentRegisterRequest(BaseModel):
+    agent_id: str
+    profile: str = "unknown"
+    price: float = 0.1
+    eta_minutes: int = 5
+    confidence: float = 0.5
+
+
+class PipelineRequest(BaseModel):
+    objective: str = ""
+    source: str = "manual"
+    inputs: dict = {}
+
+
+async def _retry_post(client: httpx.AsyncClient, url: str, **kwargs):
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = await client.post(url, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except httpx.RequestError as e:
+            last_exc = e
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_BACKOFF * (2 ** attempt))
+                logger.warning("Retry %d for %s: %s", attempt + 1, url, e)
+    raise last_exc
 
 
 @app.get("/health")
@@ -26,21 +59,17 @@ async def health():
 
 
 @app.post("/agents/register")
-async def register_agent(agent: dict):
-    agent_id = agent.get("agent_id")
-    profile = agent.get("profile", "unknown")
-    if not agent_id:
-        raise HTTPException(status_code=422, detail="Missing agent_id")
-    registered_agents[agent_id] = agent
+async def register_agent(agent: AgentRegisterRequest):
+    registered_agents[agent.agent_id] = agent.model_dump()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(f"{REPUTATION_URL}/register", json={
-                "agent_id": agent_id, "profile": profile,
+                "agent_id": agent.agent_id, "profile": agent.profile,
             })
     except httpx.RequestError:
         pass
-    logger.info("Registered agent %s (%s)", agent_id, profile)
-    return {"ok": 1, "agent_id": agent_id}
+    logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
+    return {"ok": 1, "agent_id": agent.agent_id}
 
 
 @app.get("/agents")
@@ -52,12 +81,10 @@ async def list_agents():
 async def pipeline(task: dict):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            norm_resp = await client.post(f"{NORMALIZATION_URL}/normalize", json=task)
-            norm_resp.raise_for_status()
+            norm_resp = await _retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task)
             normalized = norm_resp.json()
 
-            rank_resp = await client.post(f"{RANKING_URL}/rank", json=normalized)
-            rank_resp.raise_for_status()
+            rank_resp = await _retry_post(client, f"{RANKING_URL}/rank", json=normalized)
             ranked = rank_resp.json()
 
             publish_payload = {
@@ -67,8 +94,7 @@ async def pipeline(task: dict):
                 "inputs": normalized.get("inputs", {}),
                 "source": normalized.get("source", "manual"),
             }
-            pub_resp = await client.post(f"{MARKETPLACE_URL}/publish", json=publish_payload)
-            pub_resp.raise_for_status()
+            await _retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload)
 
             logger.info("Task %s published with priority %.2f", ranked["id"], ranked["priority_score"])
             return {
@@ -96,31 +122,32 @@ async def full_pipeline(task: dict):
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for agent_id, agent_info in registered_agents.items():
+            async def _submit_bid(agent_id, agent_info):
                 bid_payload = {
                     "task_id": task_id,
                     "agent_id": agent_id,
                     "price": agent_info.get("price", 0.1),
                     "eta_minutes": agent_info.get("eta_minutes", 5),
                     "confidence": agent_info.get("confidence", 0.5),
-                    "profile": agent_info.get("profile", "unknown"),
                 }
                 try:
                     await client.post(f"{MARKETPLACE_URL}/bid", json=bid_payload)
                 except httpx.RequestError:
                     logger.warning("Failed to submit bid for agent %s", agent_id)
 
-            award_resp = await client.post(f"{MARKETPLACE_URL}/award/{task_id}")
-            award_resp.raise_for_status()
+            await asyncio.gather(*[
+                _submit_bid(aid, ainfo) for aid, ainfo in registered_agents.items()
+            ])
+
+            award_resp = await _retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}")
             award_data = award_resp.json()
             winner = award_data["winner"]
 
-            exec_resp = await client.post(f"{EXECUTION_URL}/execute", json={
+            exec_resp = await _retry_post(client, f"{EXECUTION_URL}/execute", json={
                 "task_id": task_id,
                 "agent_id": winner["agent_id"],
                 "confidence": winner.get("confidence", 0.5),
             })
-            exec_resp.raise_for_status()
             exec_data = exec_resp.json()
 
             status = "completed" if exec_data.get("success") else "failed"
