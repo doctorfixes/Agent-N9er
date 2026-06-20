@@ -20,3 +20,11 @@ async def test_health_returns_ok(client):
 async def test_health_status_code(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
+
+
+async def test_watchers_list(client):
+    resp = await client.get("/watchers")
+    data = resp.json()
+    assert "available" in data
+    assert "gmail" in data["available"]
+    assert len(data["available"]) == 8

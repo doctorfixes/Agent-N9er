@@ -3,12 +3,12 @@ import random
 from .base_agent import BaseAgent
 
 
-class SpeedDemon(BaseAgent):
+class BalancedGeneralist(BaseAgent):
     def bid(self, task: dict):
         complexity = self.analyze_task(task)
-        confidence = max(0.3, 0.7 - complexity * 0.3 + self.reputation * 0.2)
-        price = round(0.05 + complexity * 0.1, 2)
-        eta = max(1, round(1 + complexity * 3))
+        confidence = max(0.4, 0.8 - complexity * 0.15 + self.reputation * 0.15)
+        price = round(0.1 + complexity * 0.2, 2)
+        eta = max(2, round(3 + complexity * 3))
 
         return {
             "agent_id": self.agent_id,
@@ -19,7 +19,7 @@ class SpeedDemon(BaseAgent):
 
     def execute(self, task: dict):
         complexity = self.analyze_task(task)
-        base_rate = 0.85 - complexity * 0.2
+        base_rate = 0.90 - complexity * 0.15
         success = random.random() < base_rate
-        duration = max(1, round(2 + complexity * 3))
+        duration = max(2, round(3 + complexity * 3))
         return success, duration

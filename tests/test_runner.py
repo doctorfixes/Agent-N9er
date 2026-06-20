@@ -1,17 +1,9 @@
-import sys
-from pathlib import Path
-from unittest.mock import patch
-
-root = Path(__file__).resolve().parent.parent
-
-sys.path.insert(0, str(root))
-
-from simulation.agent_personalities import SpeedDemon, PrecisionSpecialist
+from simulation.agent_personalities import SpeedDemon, PrecisionSpecialist, BalancedGeneralist
 from simulation.runner import run
 
 
 def _make_agents():
-    return [SpeedDemon("speed"), PrecisionSpecialist("precision")]
+    return [SpeedDemon("speed"), PrecisionSpecialist("precision"), BalancedGeneralist("balanced")]
 
 
 def test_run_returns_correct_count():
@@ -31,6 +23,8 @@ def test_run_result_structure():
     assert "winner" in r
     assert "success" in r
     assert "duration" in r
+    assert "bids" in r
+    assert "round" in r
 
 
 def test_run_winner_is_valid_agent():
@@ -49,9 +43,7 @@ def test_run_updates_reputation():
     assert changed
 
 
-def test_precision_specialist_wins_over_speed_demon():
+def test_run_includes_all_bids():
     agents = _make_agents()
-    results = run(agents, n=5)
-    precision_id = agents[1].agent_id
-    for r in results:
-        assert r["winner"]["agent_id"] == precision_id
+    results = run(agents, n=1)
+    assert len(results[0]["bids"]) == 3

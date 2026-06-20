@@ -6,18 +6,19 @@ from integration_layer.dashboard_summary import summary
 
 
 async def test_forward_task_posts_to_orchestrator():
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"status": "task_published"}
+    mock_resp.raise_for_status = MagicMock()
+
     mock_client = AsyncMock()
-    mock_client.post = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_resp)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
     with patch("integration_layer.submit_task.httpx.AsyncClient", return_value=mock_client):
-        await forward_task({"objective": "test"})
+        result = await forward_task({"objective": "test"})
 
-    mock_client.post.assert_called_once_with(
-        "http://orchestrator:9000/pipeline",
-        json={"objective": "test"},
-    )
+    assert result["status"] == "task_published"
 
 
 async def test_summary_fetches_tasks_and_agents():

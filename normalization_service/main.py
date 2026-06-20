@@ -1,6 +1,32 @@
-from fastapi import FastAPI
 import uuid
-app=FastAPI()
+import logging
+
+from fastapi import FastAPI
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("normalization")
+
+app = FastAPI(title="Verixio Normalization Service")
+
+
+@app.get("/health")
+async def health():
+    return {"ok": 1, "service": "normalization"}
+
+
 @app.post("/normalize")
-async def n(t: dict):
- return{"id":str(uuid.uuid4()),"objective":t.get("objective",""),"inputs":t.get("inputs",{}),"raw":t}
+async def normalize(task: dict):
+    task_id = str(uuid.uuid4())
+    objective = task.get("objective", "")
+    inputs = task.get("inputs", {})
+    source = task.get("source", "manual")
+
+    normalized = {
+        "id": task_id,
+        "objective": objective,
+        "inputs": inputs,
+        "source": source,
+        "raw": task,
+    }
+    logger.info("Normalized task %s: %s", task_id, objective[:80])
+    return normalized

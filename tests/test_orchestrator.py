@@ -14,14 +14,16 @@ def client():
     return AsyncClient(transport=transport, base_url="http://test")
 
 
-def _make_response(data):
+def _make_response(data, status_code=200):
     resp = MagicMock()
     resp.json.return_value = data
+    resp.status_code = status_code
+    resp.raise_for_status = MagicMock()
     return resp
 
 
-def _mock_responses():
-    normalized = {"id": "n1", "objective": "test task", "inputs": {}, "raw": {}}
+def _mock_pipeline():
+    normalized = {"id": "n1", "objective": "test task", "inputs": {}, "source": "manual", "raw": {}}
     ranked = {"id": "n1", "priority_score": 0.9}
 
     async def mock_post(url, **kwargs):
@@ -32,16 +34,15 @@ def _mock_responses():
         elif "publish" in url:
             return _make_response({"ok": 1})
 
-    return mock_post, normalized, ranked
-
-
-async def test_pipeline_calls_all_services(client):
-    mock_post, normalized, ranked = _mock_responses()
-
     mock_client = AsyncMock()
     mock_client.post = mock_post
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client, normalized, ranked
+
+
+async def test_pipeline_calls_all_services(client):
+    mock_client, normalized, ranked = _mock_pipeline()
 
     with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
         resp = await client.post("/pipeline", json={"objective": "test task"})
@@ -53,13 +54,13 @@ async def test_pipeline_calls_all_services(client):
     assert data["ranked"] == ranked
 
 
-async def test_pipeline_passes_normalized_to_ranking(client):
+async def test_pipeline_passes_data_through_stages(client):
     calls = []
 
     async def tracking_post(url, **kwargs):
         calls.append((url, kwargs.get("json")))
         if "normalize" in url:
-            return _make_response({"id": "n1", "objective": "x", "inputs": {}, "raw": {}})
+            return _make_response({"id": "n1", "objective": "x", "inputs": {}, "source": "manual", "raw": {}})
         elif "rank" in url:
             return _make_response({"id": "n1", "priority_score": 0.1})
         elif "publish" in url:
@@ -78,3 +79,8 @@ async def test_pipeline_passes_normalized_to_ranking(client):
 
     publish_call = [c for c in calls if "publish" in c[0]][0]
     assert publish_call[1]["priority_score"] == 0.1
+
+
+async def test_health_endpoint(client):
+    resp = await client.get("/health")
+    assert resp.json()["ok"] == 1

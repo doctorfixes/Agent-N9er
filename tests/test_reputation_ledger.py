@@ -44,6 +44,12 @@ async def test_update_failure_increments(client):
     assert ledger["a1"]["fail"] == 1
 
 
+async def test_update_tracks_score(client):
+    await client.post("/update", json={"agent_id": "a1", "success": True})
+    ledger = (await client.get("/ledger")).json()
+    assert ledger["a1"]["score"] == 0.51
+
+
 async def test_multiple_updates_accumulate(client):
     for _ in range(3):
         await client.post("/update", json={"agent_id": "a1", "success": True})
@@ -59,3 +65,24 @@ async def test_separate_agents_tracked_independently(client):
     ledger = (await client.get("/ledger")).json()
     assert ledger["a1"]["success"] == 1
     assert ledger["a2"]["fail"] == 1
+
+
+async def test_get_single_agent(client):
+    await client.post("/update", json={"agent_id": "a1", "success": True})
+    resp = await client.get("/agent/a1")
+    assert resp.json()["agent_id"] == "a1"
+
+
+async def test_get_missing_agent_returns_404(client):
+    resp = await client.get("/agent/nonexistent")
+    assert resp.status_code == 404
+
+
+async def test_update_missing_agent_id_returns_422(client):
+    resp = await client.post("/update", json={"success": True})
+    assert resp.status_code == 422
+
+
+async def test_health_endpoint(client):
+    resp = await client.get("/health")
+    assert resp.json()["ok"] == 1

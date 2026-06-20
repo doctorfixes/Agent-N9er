@@ -4,6 +4,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
 
+sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "simulation"))
 sys.path.insert(0, str(root / "integration_layer"))
 sys.path.insert(0, str(root / "integration"))

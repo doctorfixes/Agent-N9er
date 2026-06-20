@@ -1,5 +1,5 @@
 import pytest
-from market import score, winner
+from simulation.market import score, winner
 
 
 def test_score_returns_confidence():

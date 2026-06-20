@@ -1,12 +1,94 @@
-version:"3.9"
+version: "3.9"
+
 services:
- orchestrator:{build:"./orchestrator",ports:["9000:9000"]}
- normalization-service:{build:"./normalization_service",ports:["8100:8100"]}
- ranking-engine:{build:"./ranking_engine",ports:["8200:8200"]}
- bidding-marketplace:{build:"./bidding_marketplace",ports:["8300:8300"]}
- agent-execution:{build:"./agent_execution",ports:["8400:8400"]}
- reputation-ledger:{build:"./reputation_ledger",ports:["8500:8500"]}
- recurring-engine:{build:"./recurring_engine",ports:["8600:8600"]}
- browser-service:{build:"./browser_service",ports:["8001:8001"]}
- simulation-engine:{build:"./simulation",ports:["9100:9100"]}
- dashboard:{build:"./dashboard",ports:["3000:3000"]}
+  orchestrator:
+    build: ./orchestrator
+    ports:
+      - "9000:9000"
+    environment:
+      - NORMALIZATION_URL=http://normalization-service:8100
+      - RANKING_URL=http://ranking-engine:8200
+      - MARKETPLACE_URL=http://bidding-marketplace:8300
+    depends_on:
+      normalization-service:
+        condition: service_started
+      ranking-engine:
+        condition: service_started
+      bidding-marketplace:
+        condition: service_started
+    restart: unless-stopped
+
+  normalization-service:
+    build: ./normalization_service
+    ports:
+      - "8100:8100"
+    restart: unless-stopped
+
+  ranking-engine:
+    build: ./ranking_engine
+    ports:
+      - "8200:8200"
+    restart: unless-stopped
+
+  bidding-marketplace:
+    build: ./bidding_marketplace
+    ports:
+      - "8300:8300"
+    restart: unless-stopped
+
+  agent-execution:
+    build: ./agent_execution
+    ports:
+      - "8400:8400"
+    environment:
+      - REPUTATION_URL=http://reputation-ledger:8500
+    depends_on:
+      reputation-ledger:
+        condition: service_started
+    restart: unless-stopped
+
+  reputation-ledger:
+    build: ./reputation_ledger
+    ports:
+      - "8500:8500"
+    restart: unless-stopped
+
+  recurring-engine:
+    build: ./recurring_engine
+    ports:
+      - "8600:8600"
+    restart: unless-stopped
+
+  browser-service:
+    build: ./browser_service
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  simulation-engine:
+    build: ./simulation
+    ports:
+      - "9100:9100"
+    environment:
+      - MARKETPLACE_URL=http://bidding-marketplace:8300
+      - EXECUTION_URL=http://agent-execution:8400
+      - REPUTATION_URL=http://reputation-ledger:8500
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - MARKETPLACE_URL=http://bidding-marketplace:8300
+      - REPUTATION_URL=http://reputation-ledger:8500
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+      - SIMULATION_URL=http://simulation-engine:9100
+    depends_on:
+      orchestrator:
+        condition: service_started
+      bidding-marketplace:
+        condition: service_started
+      reputation-ledger:
+        condition: service_started
+    restart: unless-stopped

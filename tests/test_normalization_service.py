@@ -44,3 +44,13 @@ async def test_normalize_preserves_raw(client):
     payload = {"objective": "x", "extra": "data"}
     resp = await client.post("/normalize", json=payload)
     assert resp.json()["raw"] == payload
+
+
+async def test_normalize_includes_source(client):
+    resp = await client.post("/normalize", json={"objective": "x", "source": "github"})
+    assert resp.json()["source"] == "github"
+
+
+async def test_health_endpoint(client):
+    resp = await client.get("/health")
+    assert resp.json()["ok"] == 1

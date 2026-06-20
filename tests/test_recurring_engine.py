@@ -26,14 +26,25 @@ async def test_rules_initially_empty(client):
     assert resp.json() == []
 
 
+async def test_add_rule(client):
+    resp = await client.post("/rules", json={"objective": "daily standup"})
+    assert resp.json()["ok"] == 1
+    assert resp.json()["rule"]["objective"] == "daily standup"
+
+
+async def test_add_rule_missing_objective(client):
+    resp = await client.post("/rules", json={"schedule": "daily"})
+    assert resp.status_code == 422
+
+
 async def test_tick_with_no_rules_returns_empty(client):
     resp = await client.get("/tick")
     assert resp.json() == []
 
 
 async def test_tick_generates_tasks_from_rules(client):
-    recurring.rules.append({"objective": "daily report"})
-    recurring.rules.append({"objective": "sync data"})
+    recurring.rules.append({"objective": "daily report", "rule_id": "r1"})
+    recurring.rules.append({"objective": "sync data", "rule_id": "r2"})
     resp = await client.get("/tick")
     tasks = resp.json()
     assert len(tasks) == 2
@@ -42,13 +53,18 @@ async def test_tick_generates_tasks_from_rules(client):
 
 
 async def test_tick_generates_valid_uuids(client):
-    recurring.rules.append({"objective": "test"})
+    recurring.rules.append({"objective": "test", "rule_id": "r1"})
     resp = await client.get("/tick")
     uuid.UUID(resp.json()[0]["id"])
 
 
 async def test_tick_generates_unique_ids_each_call(client):
-    recurring.rules.append({"objective": "test"})
+    recurring.rules.append({"objective": "test", "rule_id": "r1"})
     id1 = (await client.get("/tick")).json()[0]["id"]
     id2 = (await client.get("/tick")).json()[0]["id"]
     assert id1 != id2
+
+
+async def test_health_endpoint(client):
+    resp = await client.get("/health")
+    assert resp.json()["ok"] == 1
