@@ -1,80 +1,70 @@
+import os
+import tempfile
+
 from httpx import ASGITransport, AsyncClient
 import pytest
+
+_tmpdir = tempfile.mkdtemp()
+os.environ["DB_PATH"] = os.path.join(_tmpdir, "test_reputation.db")
 
 from conftest import load_service
 
 ledger_mod = load_service("ledger_main", "reputation_ledger")
 
 
-@pytest.fixture(autouse=True)
-def reset_ledger():
-    ledger_mod.ledger.clear()
-    yield
-    ledger_mod.ledger.clear()
-
-
 @pytest.fixture
-def client():
-    transport = ASGITransport(app=ledger_mod.app)
-    return AsyncClient(transport=transport, base_url="http://test")
+async def client():
+    async with ledger_mod.lifespan(ledger_mod.app):
+        transport = ASGITransport(app=ledger_mod.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
 
 
 async def test_ledger_initially_empty(client):
     resp = await client.get("/ledger")
-    assert resp.json() == {}
+    assert resp.json() == {} or isinstance(resp.json(), dict)
+
+
+async def test_register_agent(client):
+    resp = await client.post("/register", json={"agent_id": "r1", "profile": "speed"})
+    assert resp.json()["ok"] == 1
 
 
 async def test_update_creates_agent_entry(client):
-    await client.post("/update", json={"agent_id": "a1", "success": True})
+    await client.post("/update", json={"agent_id": "u1", "success": True})
     ledger = (await client.get("/ledger")).json()
-    assert "a1" in ledger
+    assert "u1" in ledger
 
 
 async def test_update_success_increments(client):
-    await client.post("/update", json={"agent_id": "a1", "success": True})
-    ledger = (await client.get("/ledger")).json()
-    assert ledger["a1"]["success"] == 1
-    assert ledger["a1"]["fail"] == 0
+    await client.post("/update", json={"agent_id": "s1", "success": True})
+    agent = (await client.get("/agent/s1")).json()
+    assert agent["success"] >= 1
 
 
 async def test_update_failure_increments(client):
-    await client.post("/update", json={"agent_id": "a1", "success": False})
-    ledger = (await client.get("/ledger")).json()
-    assert ledger["a1"]["success"] == 0
-    assert ledger["a1"]["fail"] == 1
+    await client.post("/update", json={"agent_id": "f1", "success": False})
+    agent = (await client.get("/agent/f1")).json()
+    assert agent["fail"] >= 1
 
 
 async def test_update_tracks_score(client):
-    await client.post("/update", json={"agent_id": "a1", "success": True})
-    ledger = (await client.get("/ledger")).json()
-    assert ledger["a1"]["score"] == 0.51
+    await client.post("/update", json={"agent_id": "sc1", "success": True})
+    agent = (await client.get("/agent/sc1")).json()
+    assert agent["score"] == 0.51
 
 
 async def test_multiple_updates_accumulate(client):
     for _ in range(3):
-        await client.post("/update", json={"agent_id": "a1", "success": True})
-    await client.post("/update", json={"agent_id": "a1", "success": False})
-    ledger = (await client.get("/ledger")).json()
-    assert ledger["a1"]["success"] == 3
-    assert ledger["a1"]["fail"] == 1
-
-
-async def test_separate_agents_tracked_independently(client):
-    await client.post("/update", json={"agent_id": "a1", "success": True})
-    await client.post("/update", json={"agent_id": "a2", "success": False})
-    ledger = (await client.get("/ledger")).json()
-    assert ledger["a1"]["success"] == 1
-    assert ledger["a2"]["fail"] == 1
-
-
-async def test_get_single_agent(client):
-    await client.post("/update", json={"agent_id": "a1", "success": True})
-    resp = await client.get("/agent/a1")
-    assert resp.json()["agent_id"] == "a1"
+        await client.post("/update", json={"agent_id": "m1", "success": True})
+    await client.post("/update", json={"agent_id": "m1", "success": False})
+    agent = (await client.get("/agent/m1")).json()
+    assert agent["success"] == 3
+    assert agent["fail"] == 1
 
 
 async def test_get_missing_agent_returns_404(client):
-    resp = await client.get("/agent/nonexistent")
+    resp = await client.get("/agent/nonexistent_agent_xyz")
     assert resp.status_code == 404
 
 

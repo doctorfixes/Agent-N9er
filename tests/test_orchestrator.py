@@ -8,6 +8,13 @@ from conftest import load_service
 orch = load_service("orch_main", "orchestrator")
 
 
+@pytest.fixture(autouse=True)
+def reset_agents():
+    orch.registered_agents.clear()
+    yield
+    orch.registered_agents.clear()
+
+
 @pytest.fixture
 def client():
     transport = ASGITransport(app=orch.app)
@@ -33,6 +40,17 @@ def _mock_pipeline():
             return _make_response(ranked)
         elif "publish" in url:
             return _make_response({"ok": 1})
+        elif "register" in url:
+            return _make_response({"ok": 1})
+        elif "bid" in url:
+            return _make_response({"ok": 1})
+        elif "award" in url:
+            return _make_response({"ok": 1, "winner": {"agent_id": "a1", "confidence": 0.8}})
+        elif "execute" in url:
+            return _make_response({"ok": 1, "success": True, "duration": 3.5})
+        elif "complete" in url:
+            return _make_response({"ok": 1})
+        return _make_response({})
 
     mock_client = AsyncMock()
     mock_client.post = mock_post
@@ -54,33 +72,43 @@ async def test_pipeline_calls_all_services(client):
     assert data["ranked"] == ranked
 
 
-async def test_pipeline_passes_data_through_stages(client):
-    calls = []
-
-    async def tracking_post(url, **kwargs):
-        calls.append((url, kwargs.get("json")))
-        if "normalize" in url:
-            return _make_response({"id": "n1", "objective": "x", "inputs": {}, "source": "manual", "raw": {}})
-        elif "rank" in url:
-            return _make_response({"id": "n1", "priority_score": 0.1})
-        elif "publish" in url:
-            return _make_response({"ok": 1})
-
-    mock_client = AsyncMock()
-    mock_client.post = tracking_post
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
+async def test_register_agent(client):
+    mock_client, _, _ = _mock_pipeline()
     with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
-        await client.post("/pipeline", json={"objective": "x"})
+        resp = await client.post("/agents/register", json={"agent_id": "a1", "profile": "speed"})
+    assert resp.json()["ok"] == 1
+    assert "a1" in orch.registered_agents
 
-    rank_call = [c for c in calls if "rank" in c[0]][0]
-    assert rank_call[1]["id"] == "n1"
 
-    publish_call = [c for c in calls if "publish" in c[0]][0]
-    assert publish_call[1]["priority_score"] == 0.1
+async def test_full_pipeline(client):
+    orch.registered_agents["a1"] = {
+        "agent_id": "a1", "profile": "speed", "price": 0.1,
+        "eta_minutes": 2, "confidence": 0.8,
+    }
+
+    mock_client, _, _ = _mock_pipeline()
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/pipeline/full", json={"objective": "test"})
+
+    data = resp.json()
+    assert data["status"] in ("completed", "failed")
+    assert "winner" in data
+    assert "execution" in data
+
+
+async def test_full_pipeline_no_agents(client):
+    mock_client, _, _ = _mock_pipeline()
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/pipeline/full", json={"objective": "test"})
+    assert resp.json()["status"] == "task_published_no_agents"
 
 
 async def test_health_endpoint(client):
     resp = await client.get("/health")
     assert resp.json()["ok"] == 1
+
+
+async def test_list_agents(client):
+    orch.registered_agents["a1"] = {"agent_id": "a1", "profile": "speed"}
+    resp = await client.get("/agents")
+    assert "a1" in resp.json()

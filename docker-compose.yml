@@ -9,12 +9,19 @@ services:
       - NORMALIZATION_URL=http://normalization-service:8100
       - RANKING_URL=http://ranking-engine:8200
       - MARKETPLACE_URL=http://bidding-marketplace:8300
+      - EXECUTION_URL=http://agent-execution:8400
+      - REPUTATION_URL=http://reputation-ledger:8500
+      - RECURRING_URL=http://recurring-engine:8600
     depends_on:
       normalization-service:
         condition: service_started
       ranking-engine:
         condition: service_started
       bidding-marketplace:
+        condition: service_started
+      agent-execution:
+        condition: service_started
+      reputation-ledger:
         condition: service_started
     restart: unless-stopped
 
@@ -34,6 +41,10 @@ services:
     build: ./bidding_marketplace
     ports:
       - "8300:8300"
+    environment:
+      - DB_PATH=/data/marketplace.db
+    volumes:
+      - marketplace-data:/data
     restart: unless-stopped
 
   agent-execution:
@@ -42,6 +53,9 @@ services:
       - "8400:8400"
     environment:
       - REPUTATION_URL=http://reputation-ledger:8500
+      - DB_PATH=/data/execution.db
+    volumes:
+      - execution-data:/data
     depends_on:
       reputation-ledger:
         condition: service_started
@@ -51,6 +65,10 @@ services:
     build: ./reputation_ledger
     ports:
       - "8500:8500"
+    environment:
+      - DB_PATH=/data/reputation.db
+    volumes:
+      - reputation-data:/data
     restart: unless-stopped
 
   recurring-engine:
@@ -63,6 +81,13 @@ services:
     build: ./browser_service
     ports:
       - "8001:8001"
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+    depends_on:
+      orchestrator:
+        condition: service_started
     restart: unless-stopped
 
   simulation-engine:
@@ -70,9 +95,13 @@ services:
     ports:
       - "9100:9100"
     environment:
+      - ORCHESTRATOR_URL=http://orchestrator:9000
       - MARKETPLACE_URL=http://bidding-marketplace:8300
       - EXECUTION_URL=http://agent-execution:8400
       - REPUTATION_URL=http://reputation-ledger:8500
+    depends_on:
+      orchestrator:
+        condition: service_started
     restart: unless-stopped
 
   dashboard:
@@ -92,3 +121,8 @@ services:
       reputation-ledger:
         condition: service_started
     restart: unless-stopped
+
+volumes:
+  marketplace-data:
+  execution-data:
+  reputation-data:
