@@ -1,14 +1,6 @@
 from fastapi import FastAPI
 import uuid
-
-app = FastAPI()
-
-
+app=FastAPI()
 @app.post("/normalize")
-async def normalize(task: dict):
-    return {
-        "id": str(uuid.uuid4()),
-        "objective": task.get("objective", ""),
-        "inputs": task.get("inputs", {}),
-        "raw": task,
-    }
+async def n(t):
+ return{"id":str(uuid.uuid4()),"objective":t.get("objective",""),"inputs":t.get("inputs",{}),"raw":t}

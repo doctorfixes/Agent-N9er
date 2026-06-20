@@ -1,18 +1,12 @@
 from fastapi import FastAPI
-
-app = FastAPI()
-ledger = {}
-
-
+ledger={}
+app=FastAPI()
 @app.post("/update")
-async def update(result: dict):
-    agent_id = result["agent_id"]
-    ledger[agent_id] = ledger.get(agent_id, {"success": 0, "fail": 0})
-    ledger[agent_id]["success"] += 1 if result["success"] else 0
-    ledger[agent_id]["fail"] += 0 if result["success"] else 1
-    return {"ok": 1}
-
-
+async def u(r):
+ a=r["agent_id"]
+ ledger[a]=ledger.get(a,{"success":0,"fail":0})
+ ledger[a]["success"]+=1 if r["success"]else 0
+ ledger[a]["fail"]+=0 if r["success"]else 1
+ return{"ok":1}
 @app.get("/ledger")
-async def get_ledger():
-    return ledger
+async def l():return ledger

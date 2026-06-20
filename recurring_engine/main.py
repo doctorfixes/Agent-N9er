@@ -1,15 +1,8 @@
 from fastapi import FastAPI
 import uuid
-
-app = FastAPI()
-rules = []
-
-
+rules=[]
+app=FastAPI()
 @app.get("/rules")
-async def get_rules():
-    return rules
-
-
+async def r():return rules
 @app.get("/tick")
-async def tick():
-    return [{"id": str(uuid.uuid4()), "objective": x["objective"]} for x in rules]
+async def t():return[{"id":str(uuid.uuid4()),"objective":x["objective"]}for x in rules]
