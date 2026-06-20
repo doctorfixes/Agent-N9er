@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.task_taxonomy import list_categories, TaskCategory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("recurring")
@@ -38,8 +39,9 @@ async def add_rule(rule: dict):
     if "objective" not in rule:
         raise HTTPException(status_code=422, detail="Missing objective")
     rule["rule_id"] = str(uuid.uuid4())
+    rule.setdefault("category", "uncategorized")
     rules.append(rule)
-    logger.info("Added rule %s: %s", rule["rule_id"], rule["objective"][:80])
+    logger.info("Added rule %s [%s]: %s", rule["rule_id"], rule["category"], rule["objective"][:80])
     return {"ok": 1, "rule": rule}
 
 
@@ -57,8 +59,14 @@ async def tick():
             "objective": rule["objective"],
             "source": "recurring",
             "rule_id": rule.get("rule_id"),
+            "category": rule.get("category", "uncategorized"),
         }
         generated.append(task)
     if generated:
         logger.info("Tick generated %d tasks from %d rules", len(generated), len(rules))
     return generated
+
+
+@app.get("/categories")
+async def categories():
+    return list_categories()

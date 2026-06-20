@@ -5,7 +5,7 @@ import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -13,6 +13,7 @@ from shared.security import (
     RequestIDMiddleware, RateLimitMiddleware, APIKeyMiddleware,
     get_service_headers,
 )
+from shared.task_taxonomy import get_specialization_boost, list_categories
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -46,6 +47,7 @@ registered_agents = {}
 class AgentRegisterRequest(BaseModel):
     agent_id: str
     profile: str = "unknown"
+    specialization: str = "generalist"
     price: float = 0.1
     eta_minutes: int = 5
     confidence: float = 0.5
@@ -96,13 +98,19 @@ async def register_agent(agent: AgentRegisterRequest):
             )
     except httpx.RequestError:
         pass
-    logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
+    logger.info("Registered agent %s (%s, specialization=%s)",
+                agent.agent_id, agent.profile, agent.specialization)
     return {"ok": 1, "agent_id": agent.agent_id}
 
 
 @app.get("/agents")
 async def list_agents():
     return registered_agents
+
+
+@app.get("/task-categories")
+async def task_categories(tier: str = None):
+    return list_categories(tier)
 
 
 @app.post("/pipeline")
@@ -125,7 +133,9 @@ async def pipeline(task: dict):
             }
             await _retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload, headers=svc)
 
-            logger.info("Task %s published with priority %.2f", ranked["id"], ranked["priority_score"])
+            logger.info("Task %s published with priority %.2f [%s/%s]",
+                        ranked["id"], ranked["priority_score"],
+                        normalized.get("category", "?"), normalized.get("tier", "?"))
             return {
                 "status": "task_published",
                 "task_id": ranked["id"],
@@ -144,6 +154,7 @@ async def pipeline(task: dict):
 async def full_pipeline(task: dict):
     pub_result = await pipeline(task)
     task_id = pub_result["task_id"]
+    category = pub_result.get("normalized", {}).get("category", "uncategorized")
 
     if not registered_agents:
         return {**pub_result, "status": "task_published_no_agents",
@@ -153,12 +164,17 @@ async def full_pipeline(task: dict):
         svc = _svc_headers()
         async with httpx.AsyncClient(timeout=15.0) as client:
             async def _submit_bid(agent_id, agent_info):
+                base_confidence = agent_info.get("confidence", 0.5)
+                specialization = agent_info.get("specialization", "generalist")
+                boost = get_specialization_boost(specialization, category)
+                adjusted_confidence = min(1.0, base_confidence + boost)
+
                 bid_payload = {
                     "task_id": task_id,
                     "agent_id": agent_id,
                     "price": agent_info.get("price", 0.1),
                     "eta_minutes": agent_info.get("eta_minutes", 5),
-                    "confidence": agent_info.get("confidence", 0.5),
+                    "confidence": round(adjusted_confidence, 3),
                 }
                 try:
                     await client.post(f"{MARKETPLACE_URL}/bid", json=bid_payload, headers=svc)
@@ -187,11 +203,12 @@ async def full_pipeline(task: dict):
                 headers=svc,
             )
 
-            logger.info("Full pipeline complete for task %s: %s (agent %s)",
-                        task_id, status, winner["agent_id"])
+            logger.info("Full pipeline complete for task %s [%s]: %s (agent %s)",
+                        task_id, category, status, winner["agent_id"])
             return {
                 "status": status,
                 "task_id": task_id,
+                "category": category,
                 "winner": winner,
                 "execution": exec_data,
             }

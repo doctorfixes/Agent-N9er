@@ -4,6 +4,8 @@ from .base_agent import BaseAgent
 
 
 class PrecisionSpecialist(BaseAgent):
+    specialization = "code_specialist"
+
     def bid(self, task: dict):
         complexity = self.analyze_task(task)
         confidence = max(0.5, 0.95 - complexity * 0.1 + self.reputation * 0.1)

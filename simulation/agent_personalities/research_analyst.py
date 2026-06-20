@@ -3,14 +3,14 @@ import random
 from .base_agent import BaseAgent
 
 
-class BalancedGeneralist(BaseAgent):
-    specialization = "generalist"
+class ResearchAnalyst(BaseAgent):
+    specialization = "research_analyst"
 
     def bid(self, task: dict):
         complexity = self.analyze_task(task)
-        confidence = max(0.4, 0.8 - complexity * 0.15 + self.reputation * 0.15)
-        price = round(0.1 + complexity * 0.2, 2)
-        eta = max(2, round(3 + complexity * 3))
+        confidence = max(0.5, 0.90 - complexity * 0.12 + self.reputation * 0.12)
+        price = round(0.15 + complexity * 0.25, 2)
+        eta = max(4, round(5 + complexity * 5))
 
         return {
             "agent_id": self.agent_id,
@@ -21,7 +21,7 @@ class BalancedGeneralist(BaseAgent):
 
     def execute(self, task: dict):
         complexity = self.analyze_task(task)
-        base_rate = 0.90 - complexity * 0.15
+        base_rate = 0.92 - complexity * 0.12
         success = random.random() < base_rate
-        duration = max(2, round(3 + complexity * 3))
+        duration = max(4, round(5 + complexity * 5))
         return success, duration

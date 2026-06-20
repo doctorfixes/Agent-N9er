@@ -4,6 +4,8 @@ from .base_agent import BaseAgent
 
 
 class SpeedDemon(BaseAgent):
+    specialization = "operations_agent"
+
     def bid(self, task: dict):
         complexity = self.analyze_task(task)
         confidence = max(0.3, 0.7 - complexity * 0.3 + self.reputation * 0.2)

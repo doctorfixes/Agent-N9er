@@ -2,6 +2,8 @@ import uuid
 
 
 class BaseAgent:
+    specialization = "generalist"
+
     def __init__(self, profile: str):
         self.agent_id = str(uuid.uuid4())
         self.profile = profile
@@ -34,6 +36,7 @@ class BaseAgent:
         return {
             "agent_id": self.agent_id,
             "profile": self.profile,
+            "specialization": self.specialization,
             "reputation": round(self.reputation, 3),
             "completed": self.tasks_completed,
             "failed": self.tasks_failed,

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.task_taxonomy import classify_task, list_categories
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("normalization")
@@ -45,12 +46,25 @@ async def normalize(task: dict):
     inputs = task.get("inputs", {})
     source = task.get("source", "manual")
 
+    classification = classify_task(objective, inputs)
+
     normalized = {
         "id": task_id,
         "objective": objective,
         "inputs": inputs,
         "source": source,
+        "category": classification["category"],
+        "tier": classification["tier"],
+        "leverage_score": classification["leverage_score"],
+        "cost_tier": classification["cost_tier"],
+        "classification": classification,
         "raw": task,
     }
-    logger.info("Normalized task %s: %s", task_id, objective[:80])
+    logger.info("Normalized task %s [%s/%s]: %s",
+                task_id, classification["category"], classification["tier"], objective[:80])
     return normalized
+
+
+@app.get("/categories")
+async def get_categories(tier: str = None):
+    return list_categories(tier)

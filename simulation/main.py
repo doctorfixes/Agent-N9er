@@ -4,9 +4,12 @@ import logging
 from fastapi import FastAPI, HTTPException
 import httpx
 
-from agent_personalities import SpeedDemon, PrecisionSpecialist, BalancedGeneralist
+from agent_personalities import (
+    SpeedDemon, PrecisionSpecialist, BalancedGeneralist,
+    ResearchAnalyst, ContentCreator,
+)
 from runner import run
-from task_generator import gen
+from task_generator import gen, TASK_TEMPLATES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("simulation")
@@ -24,6 +27,8 @@ def create_agents():
         SpeedDemon("speed"),
         PrecisionSpecialist("precision"),
         BalancedGeneralist("balanced"),
+        ResearchAnalyst("research"),
+        ContentCreator("content"),
     ]
 
 
@@ -32,22 +37,28 @@ async def health():
     return {"ok": 1, "service": "simulation"}
 
 
+@app.get("/task-categories")
+async def task_categories():
+    return {cat: len(templates) for cat, templates in TASK_TEMPLATES.items()}
+
+
 @app.get("/run")
-async def run_simulation(n: int = 10):
+async def run_simulation(n: int = 10, category: str = None):
     agents = create_agents()
-    results = run(agents, n=n)
+    results = run(agents, n=n, category=category)
     agent_stats = [a.stats() for a in agents]
-    logger.info("Local simulation complete: %d rounds", n)
+    logger.info("Local simulation complete: %d rounds (category=%s)", n, category)
     return {
         "mode": "local",
         "results": results,
         "agent_stats": agent_stats,
         "rounds": n,
+        "category": category,
     }
 
 
 @app.post("/run/live")
-async def run_live_simulation(n: int = 5):
+async def run_live_simulation(n: int = 5, category: str = None):
     agents = create_agents()
 
     try:
@@ -57,6 +68,7 @@ async def run_live_simulation(n: int = 5):
                 await client.post(f"{ORCHESTRATOR_URL}/agents/register", json={
                     "agent_id": agent.agent_id,
                     "profile": agent.profile,
+                    "specialization": agent.specialization,
                     "price": bid_data["price"],
                     "eta_minutes": bid_data["eta_minutes"],
                     "confidence": bid_data["confidence"],
@@ -68,7 +80,7 @@ async def run_live_simulation(n: int = 5):
     results = []
     async with httpx.AsyncClient(timeout=30.0) as client:
         for i in range(n):
-            task = gen()
+            task = gen(category=category)
             try:
                 resp = await client.post(
                     f"{ORCHESTRATOR_URL}/pipeline/full", json=task
@@ -95,6 +107,7 @@ async def run_live_simulation(n: int = 5):
     return {
         "mode": "live",
         "rounds": n,
+        "category": category,
         "results": results,
         "agent_stats": agent_stats,
     }

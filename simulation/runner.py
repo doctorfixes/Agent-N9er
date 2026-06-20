@@ -6,10 +6,10 @@ from .market import winner
 logger = logging.getLogger("simulation.runner")
 
 
-def run(agents, n=10):
+def run(agents, n=10, category=None):
     out = []
     for i in range(n):
-        task = gen()
+        task = gen(category=category)
         bids = [agent.bid(task) for agent in agents]
         winning_bid = winner(bids)
         selected = next(a for a in agents if a.agent_id == winning_bid["agent_id"])
