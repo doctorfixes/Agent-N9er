@@ -17,10 +17,11 @@ from shared.security import (
 )
 from shared.task_taxonomy import get_specialization_boost, list_categories
 from shared.config import (
-    MAX_RETRIES, RETRY_BACKOFF, DEFAULT_TIMEOUT, PIPELINE_TIMEOUT,
+    DEFAULT_TIMEOUT, PIPELINE_TIMEOUT,
     QUICK_TIMEOUT, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
     CORS_ORIGINS,
 )
+from shared.retry import retry_post
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -110,21 +111,6 @@ def _svc_headers(request=None):
     return headers
 
 
-async def _retry_post(client: httpx.AsyncClient, url: str, **kwargs):
-    last_exc = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = await client.post(url, **kwargs)
-            resp.raise_for_status()
-            return resp
-        except httpx.RequestError as e:
-            last_exc = e
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_BACKOFF * (2 ** attempt))
-                logger.warning("Retry %d for %s: %s", attempt + 1, url, e)
-    raise last_exc
-
-
 app = FastAPI(title="Verixio Orchestrator", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
@@ -181,10 +167,10 @@ async def pipeline(task: dict):
     try:
         svc = _svc_headers()
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            norm_resp = await _retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task, headers=svc)
+            norm_resp = await retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task, headers=svc)
             normalized = norm_resp.json()
 
-            rank_resp = await _retry_post(client, f"{RANKING_URL}/rank", json=normalized, headers=svc)
+            rank_resp = await retry_post(client, f"{RANKING_URL}/rank", json=normalized, headers=svc)
             ranked = rank_resp.json()
 
             publish_payload = {
@@ -194,7 +180,7 @@ async def pipeline(task: dict):
                 "inputs": normalized.get("inputs", {}),
                 "source": normalized.get("source", "manual"),
             }
-            await _retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload, headers=svc)
+            await retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload, headers=svc)
 
             logger.info("Task %s published with priority %.2f [%s/%s]",
                         ranked["id"], ranked["priority_score"],
@@ -251,11 +237,11 @@ async def full_pipeline(task: dict):
                 _submit_bid(aid, ainfo) for aid, ainfo in agents_snapshot.items()
             ])
 
-            award_resp = await _retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
+            award_resp = await retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
             award_data = award_resp.json()
             winner = award_data["winner"]
 
-            exec_resp = await _retry_post(client, f"{EXECUTION_URL}/execute", json={
+            exec_resp = await retry_post(client, f"{EXECUTION_URL}/execute", json={
                 "task_id": task_id,
                 "agent_id": winner["agent_id"],
                 "confidence": winner.get("confidence", 0.5),

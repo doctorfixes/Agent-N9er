@@ -17,9 +17,10 @@ from shared.security import (
     get_service_headers,
 )
 from shared.config import (
-    MAX_RETRIES, DEFAULT_TIMEOUT, RATE_LIMIT_MAX_REQUESTS,
+    DEFAULT_TIMEOUT, RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS, CORS_ORIGINS,
 )
+from shared.retry import retry_request
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("browser_service")
@@ -91,19 +92,17 @@ async def deactivate_watcher(name: str):
 
 async def _forward_to_pipeline(task: dict):
     svc = get_service_headers()
-    for attempt in range(MAX_RETRIES):
-        try:
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-                resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task, headers=svc)
-                resp.raise_for_status()
-                result = resp.json()
-                logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
-                return result
-        except httpx.RequestError as e:
-            if attempt == MAX_RETRIES - 1:
-                logger.error("Failed to forward to pipeline after %d retries: %s", MAX_RETRIES, e)
-                raise HTTPException(status_code=503, detail="Orchestrator unreachable")
-            logger.warning("Retry %d forwarding to pipeline: %s", attempt + 1, e)
+    try:
+        resp = await retry_request(
+            "POST", f"{ORCHESTRATOR_URL}/pipeline",
+            timeout=DEFAULT_TIMEOUT, headers=svc, json=task,
+        )
+        result = resp.json()
+        logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
+        return result
+    except httpx.RequestError as e:
+        logger.error("Failed to forward to pipeline after retries: %s", e)
+        raise HTTPException(status_code=503, detail="Orchestrator unreachable")
 
 
 def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:

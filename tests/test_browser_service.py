@@ -31,11 +31,7 @@ def _mock_orchestrator():
     mock_resp = MagicMock()
     mock_resp.json.return_value = {"status": "task_published", "task_id": "t1"}
     mock_resp.raise_for_status = MagicMock()
-    mock_client = AsyncMock()
-    mock_client.post = AsyncMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    return patch.object(browser.httpx, "AsyncClient", return_value=mock_client)
+    return patch.object(browser, "retry_request", AsyncMock(return_value=mock_resp))
 
 
 async def test_health_returns_ok(client):

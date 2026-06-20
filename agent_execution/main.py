@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_service_headers
-from shared.config import MAX_RETRIES, RETRY_BACKOFF, QUICK_TIMEOUT, CORS_ORIGINS
+from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
+from shared.retry import retry_request
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("execution")
@@ -98,18 +99,14 @@ async def execute(request: ExecuteRequest):
         await db.commit()
 
     svc = get_service_headers()
-    for attempt in range(MAX_RETRIES):
-        try:
-            async with httpx.AsyncClient(timeout=QUICK_TIMEOUT) as client:
-                await client.post(
-                    f"{REPUTATION_URL}/update",
-                    json={"agent_id": request.agent_id, "success": success},
-                    headers=svc,
-                )
-            break
-        except httpx.RequestError as e:
-            if attempt == MAX_RETRIES - 1:
-                logger.warning("Failed to update reputation after %d retries: %s", MAX_RETRIES, e)
+    try:
+        await retry_request(
+            "POST", f"{REPUTATION_URL}/update",
+            timeout=QUICK_TIMEOUT, headers=svc,
+            json={"agent_id": request.agent_id, "success": success},
+        )
+    except httpx.RequestError as e:
+        logger.warning("Failed to update reputation after retries: %s", e)
 
     logger.info("Executed task %s by agent %s: success=%s duration=%.1fs",
                 request.task_id, request.agent_id, success, duration)
