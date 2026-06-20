@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-execution
+  namespace: agent-n9er
+  labels:
+    app: agent-execution
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agent-execution
+  template:
+    metadata:
+      labels:
+        app: agent-execution
+    spec:
+      containers:
+        - name: agent-execution
+          image: agent-n9er/agent-execution:latest
+          ports:
+            - containerPort: 8400
+          env:
+            - name: DB_PATH
+              value: /data/execution.db
+          envFrom:
+            - configMapRef:
+                name: service-urls
+            - secretRef:
+                name: auth-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8400
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8400
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: execution-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-execution
+  namespace: agent-n9er
+spec:
+  selector:
+    app: agent-execution
+  ports:
+    - port: 8400
+      targetPort: 8400

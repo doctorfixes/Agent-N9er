@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reputation-ledger
+  namespace: agent-n9er
+  labels:
+    app: reputation-ledger
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: reputation-ledger
+  template:
+    metadata:
+      labels:
+        app: reputation-ledger
+    spec:
+      containers:
+        - name: reputation-ledger
+          image: agent-n9er/reputation-ledger:latest
+          ports:
+            - containerPort: 8500
+          env:
+            - name: DB_PATH
+              value: /data/reputation.db
+          envFrom:
+            - secretRef:
+                name: auth-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8500
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8500
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: reputation-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reputation-ledger
+  namespace: agent-n9er
+spec:
+  selector:
+    app: reputation-ledger
+  ports:
+    - port: 8500
+      targetPort: 8500

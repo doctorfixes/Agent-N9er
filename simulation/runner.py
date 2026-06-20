@@ -1,22 +1,26 @@
+import logging
+
 from .task_generator import gen
 from .market import winner
 
+logger = logging.getLogger("simulation.runner")
 
-def run(agents, n=10):
+
+def run(agents, n=10, category=None):
     out = []
-    for _ in range(n):
-        task = gen()
+    for i in range(n):
+        task = gen(category=category)
         bids = [agent.bid(task) for agent in agents]
         winning_bid = winner(bids)
-        selected = [agent for agent in agents if agent.agent_id == winning_bid["agent_id"]][0]
+        selected = next(a for a in agents if a.agent_id == winning_bid["agent_id"])
         success, duration = selected.execute(task)
         selected.update_reputation(success, duration)
-        out.append(
-            {
-                "task": task,
-                "winner": winning_bid,
-                "success": success,
-                "duration": duration,
-            }
-        )
+        out.append({
+            "round": i + 1,
+            "task": task,
+            "bids": bids,
+            "winner": winning_bid,
+            "success": success,
+            "duration": duration,
+        })
     return out

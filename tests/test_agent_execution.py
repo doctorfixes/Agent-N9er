@@ -1,0 +1,89 @@
+import os
+import tempfile
+from unittest.mock import patch, AsyncMock, MagicMock
+
+from httpx import ASGITransport, AsyncClient
+import pytest
+
+_tmpdir = tempfile.mkdtemp()
+os.environ["DB_PATH"] = os.path.join(_tmpdir, "test_execution.db")
+
+from conftest import load_service
+
+execution = load_service("execution_main", "agent_execution")
+
+
+@pytest.fixture
+async def client():
+    async with execution.lifespan(execution.app):
+        transport = ASGITransport(app=execution.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+
+
+def _mock_reputation():
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return patch.object(execution.httpx, "AsyncClient", return_value=mock_client)
+
+
+async def test_execute_returns_result(client):
+    with _mock_reputation():
+        resp = await client.post("/execute", json={"task_id": "t1", "agent_id": "a1", "confidence": 0.9})
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "success" in data
+    assert "duration" in data
+
+
+async def test_execute_missing_fields_returns_422(client):
+    resp = await client.post("/execute", json={"task_id": "t1"})
+    assert resp.status_code == 422
+
+
+async def test_history_endpoint(client):
+    with _mock_reputation():
+        await client.post("/execute", json={"task_id": "h1", "agent_id": "a1", "confidence": 0.9})
+    history = (await client.get("/history")).json()
+    assert any(e["task_id"] == "h1" for e in history)
+
+
+async def test_history_filter_by_agent(client):
+    with _mock_reputation():
+        await client.post("/execute", json={"task_id": "fa1", "agent_id": "agent_x", "confidence": 0.9})
+        await client.post("/execute", json={"task_id": "fa2", "agent_id": "agent_y", "confidence": 0.8})
+    history = (await client.get("/history", params={"agent_id": "agent_x"})).json()
+    assert all(e["agent_id"] == "agent_x" for e in history)
+
+
+async def test_health_endpoint(client):
+    resp = await client.get("/health")
+    assert resp.json()["ok"] == 1
+
+
+# --- Pydantic validation tests ---
+
+async def test_execute_invalid_confidence_returns_422(client):
+    resp = await client.post("/execute", json={"task_id": "t1", "agent_id": "a1", "confidence": 2.0})
+    assert resp.status_code == 422
+
+
+async def test_execute_negative_confidence_returns_422(client):
+    resp = await client.post("/execute", json={"task_id": "t1", "agent_id": "a1", "confidence": -0.5})
+    assert resp.status_code == 422
+
+
+# --- Pagination tests ---
+
+async def test_history_pagination(client):
+    with _mock_reputation():
+        for i in range(5):
+            await client.post("/execute", json={"task_id": f"pg{i}", "agent_id": "a1", "confidence": 0.9})
+    history = (await client.get("/history", params={"limit": 2})).json()
+    assert len(history) == 2
+    history2 = (await client.get("/history", params={"limit": 2, "offset": 2})).json()
+    assert len(history2) == 2

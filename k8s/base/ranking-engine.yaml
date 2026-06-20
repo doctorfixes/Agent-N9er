@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranking-engine
+  namespace: agent-n9er
+  labels:
+    app: ranking-engine
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ranking-engine
+  template:
+    metadata:
+      labels:
+        app: ranking-engine
+    spec:
+      containers:
+        - name: ranking-engine
+          image: agent-n9er/ranking-engine:latest
+          ports:
+            - containerPort: 8200
+          envFrom:
+            - secretRef:
+                name: auth-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranking-engine
+  namespace: agent-n9er
+spec:
+  selector:
+    app: ranking-engine
+  ports:
+    - port: 8200
+      targetPort: 8200

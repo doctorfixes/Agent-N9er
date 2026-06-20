@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-service
+  namespace: agent-n9er
+  labels:
+    app: browser-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: browser-service
+  template:
+    metadata:
+      labels:
+        app: browser-service
+    spec:
+      containers:
+        - name: browser-service
+          image: agent-n9er/browser-service:latest
+          ports:
+            - containerPort: 8001
+          env:
+            - name: CORS_ORIGINS
+              value: "http://localhost:3000"
+          envFrom:
+            - configMapRef:
+                name: service-urls
+            - secretRef:
+                name: webhook-secrets
+            - secretRef:
+                name: auth-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser-service
+  namespace: agent-n9er
+spec:
+  selector:
+    app: browser-service
+  ports:
+    - port: 8001
+      targetPort: 8001

@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-n9er-ingress
+  namespace: agent-n9er
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: agent-n9er.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dashboard
+                port:
+                  number: 3000
+          - path: /api/pipeline
+            pathType: Prefix
+            backend:
+              service:
+                name: orchestrator
+                port:
+                  number: 9000
+          - path: /webhooks
+            pathType: Prefix
+            backend:
+              service:
+                name: browser-service
+                port:
+                  number: 8001

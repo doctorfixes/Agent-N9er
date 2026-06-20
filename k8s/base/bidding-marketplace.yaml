@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bidding-marketplace
+  namespace: agent-n9er
+  labels:
+    app: bidding-marketplace
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bidding-marketplace
+  template:
+    metadata:
+      labels:
+        app: bidding-marketplace
+    spec:
+      containers:
+        - name: bidding-marketplace
+          image: agent-n9er/bidding-marketplace:latest
+          ports:
+            - containerPort: 8300
+          env:
+            - name: DB_PATH
+              value: /data/marketplace.db
+          envFrom:
+            - secretRef:
+                name: auth-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: marketplace-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bidding-marketplace
+  namespace: agent-n9er
+spec:
+  selector:
+    app: bidding-marketplace
+  ports:
+    - port: 8300
+      targetPort: 8300
