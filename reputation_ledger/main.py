@@ -10,12 +10,12 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.config import CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("reputation")
 
 DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 
 class RegisterRequest(BaseModel):
@@ -28,10 +28,11 @@ class UpdateRequest(BaseModel):
     success: bool
 
 
-async def get_db():
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    return db
+@asynccontextmanager
+async def _get_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        yield db
 
 
 async def init_db():
@@ -82,15 +83,12 @@ async def health():
 
 @app.post("/register")
 async def register(agent: RegisterRequest):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         await db.execute(
             "INSERT OR IGNORE INTO agents (agent_id, profile) VALUES (?, ?)",
             (agent.agent_id, agent.profile)
         )
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
     return {"ok": 1, "agent_id": agent.agent_id}
@@ -98,8 +96,7 @@ async def register(agent: RegisterRequest):
 
 @app.post("/update")
 async def update(record: UpdateRequest):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (record.agent_id,))
         row = await cursor.fetchone()
 
@@ -122,8 +119,6 @@ async def update(record: UpdateRequest):
             (record.agent_id, row["profile"] if row else "", success, fail, round(score, 4))
         )
         await db.commit()
-    finally:
-        await db.close()
 
     entry = {"success": success, "fail": fail, "score": round(score, 4)}
     logger.info("Agent %s reputation: %.2f (W:%d L:%d)", record.agent_id, score, success, fail)
@@ -132,8 +127,7 @@ async def update(record: UpdateRequest):
 
 @app.get("/ledger")
 async def get_ledger():
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM agents ORDER BY score DESC")
         rows = await cursor.fetchall()
         return {
@@ -145,18 +139,13 @@ async def get_ledger():
             }
             for row in rows
         }
-    finally:
-        await db.close()
 
 
 @app.get("/agent/{agent_id}")
 async def get_agent(agent_id: str):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,))
         row = await cursor.fetchone()
-    finally:
-        await db.close()
 
     if not row:
         raise HTTPException(status_code=404, detail="Agent not found")

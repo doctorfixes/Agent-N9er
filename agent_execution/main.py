@@ -13,16 +13,13 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_service_headers
+from shared.config import MAX_RETRIES, RETRY_BACKOFF, QUICK_TIMEOUT, CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("execution")
 
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 DB_PATH = os.getenv("DB_PATH", "/data/execution.db")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-
-MAX_RETRIES = 3
-RETRY_BACKOFF = 0.5
 
 
 class ExecuteRequest(BaseModel):
@@ -31,10 +28,11 @@ class ExecuteRequest(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
-async def get_db():
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    return db
+@asynccontextmanager
+async def _get_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        yield db
 
 
 async def init_db():
@@ -92,20 +90,17 @@ async def execute(request: ExecuteRequest):
     duration = round(random.uniform(1, 10), 1)
     now = datetime.now(timezone.utc).isoformat()
 
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         await db.execute(
             "INSERT INTO executions (task_id, agent_id, success, duration, executed_at) VALUES (?, ?, ?, ?, ?)",
             (request.task_id, request.agent_id, success, duration, now)
         )
         await db.commit()
-    finally:
-        await db.close()
 
     svc = get_service_headers()
     for attempt in range(MAX_RETRIES):
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=QUICK_TIMEOUT) as client:
                 await client.post(
                     f"{REPUTATION_URL}/update",
                     json={"agent_id": request.agent_id, "success": success},
@@ -128,8 +123,7 @@ async def history(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         if agent_id:
             cursor = await db.execute(
                 "SELECT * FROM executions WHERE agent_id = ? ORDER BY executed_at DESC LIMIT ? OFFSET ?",
@@ -152,5 +146,3 @@ async def history(
             }
             for row in rows
         ]
-    finally:
-        await db.close()

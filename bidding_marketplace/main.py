@@ -12,12 +12,12 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.config import CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("marketplace")
 
 DB_PATH = os.getenv("DB_PATH", "/data/marketplace.db")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 
 class PublishRequest(BaseModel):
@@ -40,10 +40,11 @@ class CompleteRequest(BaseModel):
     success: bool = False
 
 
-async def get_db():
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    return db
+@asynccontextmanager
+async def _get_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        yield db
 
 
 async def init_db():
@@ -133,8 +134,7 @@ async def health():
 @app.post("/publish")
 async def publish(task: PublishRequest):
     now = datetime.now(timezone.utc).isoformat()
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO tasks (id, objective, priority_score, status, inputs, source, published_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (task.id, task.objective, task.priority_score, "open",
@@ -142,8 +142,6 @@ async def publish(task: PublishRequest):
         )
         await _audit(db, "publish", "task", task.id, f"source={task.source}")
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("Published task %s", task.id)
     return {"ok": 1, "task_id": task.id}
@@ -155,8 +153,7 @@ async def feed(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         if status:
             cursor = await db.execute(
                 "SELECT * FROM tasks WHERE status = ? ORDER BY published_at DESC LIMIT ? OFFSET ?",
@@ -169,14 +166,11 @@ async def feed(
             )
         rows = await cursor.fetchall()
         return [_task_from_row(r) for r in rows]
-    finally:
-        await db.close()
 
 
 @app.post("/bid")
 async def submit_bid(bid: BidRequest):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute("SELECT id FROM tasks WHERE id = ?", (bid.task_id,))
         if not await cursor.fetchone():
             raise HTTPException(status_code=404, detail="Task not found")
@@ -188,8 +182,6 @@ async def submit_bid(bid: BidRequest):
         )
         await _audit(db, "bid", "task", bid.task_id, f"agent={bid.agent_id} confidence={bid.confidence}")
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("Bid from agent %s on task %s (confidence=%.2f)", bid.agent_id, bid.task_id, bid.confidence)
     return {"ok": 1}
@@ -197,8 +189,7 @@ async def submit_bid(bid: BidRequest):
 
 @app.get("/bids/{task_id}")
 async def get_bids(task_id: str):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM bids WHERE task_id = ? ORDER BY confidence DESC", (task_id,))
         rows = await cursor.fetchall()
         if not rows:
@@ -206,14 +197,11 @@ async def get_bids(task_id: str):
             if not await cursor2.fetchone():
                 raise HTTPException(status_code=404, detail="Task not found")
         return [_bid_from_row(r) for r in rows]
-    finally:
-        await db.close()
 
 
 @app.post("/award/{task_id}")
 async def award_task(task_id: str):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM bids WHERE task_id = ? ORDER BY confidence DESC LIMIT 1",
             (task_id,)
@@ -229,8 +217,6 @@ async def award_task(task_id: str):
         )
         await _audit(db, "award", "task", task_id, f"winner={winning_bid['agent_id']}")
         await db.commit()
-    finally:
-        await db.close()
 
     logger.info("Task %s awarded to agent %s", task_id, winning_bid["agent_id"])
     return {"ok": 1, "winner": winning_bid}
@@ -239,13 +225,10 @@ async def award_task(task_id: str):
 @app.post("/complete/{task_id}")
 async def complete_task(task_id: str, result: CompleteRequest):
     status = "completed" if result.success else "failed"
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         await db.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
         await _audit(db, "complete", "task", task_id, f"status={status}")
         await db.commit()
-    finally:
-        await db.close()
     logger.info("Task %s marked %s", task_id, status)
     return {"ok": 1}
 
@@ -255,8 +238,7 @@ async def get_audit_log(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    db = await get_db()
-    try:
+    async with _get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -273,8 +255,6 @@ async def get_audit_log(
             }
             for row in rows
         ]
-    finally:
-        await db.close()
 
 
 def _task_from_row(row):

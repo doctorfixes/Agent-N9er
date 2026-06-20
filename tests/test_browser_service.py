@@ -13,10 +13,12 @@ browser = load_service("browser_main", "browser_service")
 
 
 @pytest.fixture(autouse=True)
-def reset_watchers():
-    browser.active_watchers.clear()
+async def reset_watchers():
+    async with browser._watchers_lock:
+        browser.active_watchers.clear()
     yield
-    browser.active_watchers.clear()
+    async with browser._watchers_lock:
+        browser.active_watchers.clear()
 
 
 @pytest.fixture
@@ -56,7 +58,8 @@ async def test_activate_watcher(client):
 
 
 async def test_deactivate_watcher(client):
-    browser.active_watchers.add("github")
+    async with browser._watchers_lock:
+        browser.active_watchers.add("github")
     resp = await client.post("/watchers/github/deactivate")
     assert resp.json()["status"] == "inactive"
 
@@ -256,6 +259,19 @@ async def test_slack_accepts_valid_signature(client):
         browser.SLACK_SIGNING_SECRET = original_secret
 
 
+async def test_slack_rejects_missing_signature_when_secret_configured(client):
+    original_secret = browser.SLACK_SIGNING_SECRET
+    try:
+        browser.SLACK_SIGNING_SECRET = "configured_secret"
+        resp = await client.post(
+            "/webhooks/slack",
+            json={"event": {"type": "message", "text": "task: test"}},
+        )
+        assert resp.status_code == 401
+    finally:
+        browser.SLACK_SIGNING_SECRET = original_secret
+
+
 # --- GitHub signature verification tests ---
 
 async def test_github_rejects_invalid_signature(client):
@@ -273,5 +289,44 @@ async def test_github_rejects_invalid_signature(client):
             },
         )
         assert resp.status_code == 401
+    finally:
+        browser.GITHUB_WEBHOOK_SECRET = original_secret
+
+
+async def test_github_rejects_missing_signature_when_secret_configured(client):
+    original_secret = browser.GITHUB_WEBHOOK_SECRET
+    try:
+        browser.GITHUB_WEBHOOK_SECRET = "gh_secret_456"
+        resp = await client.post(
+            "/webhooks/github",
+            json={"action": "opened", "issue": {"title": "test"}},
+            headers={"X-GitHub-Event": "issues"},
+        )
+        assert resp.status_code == 401
+    finally:
+        browser.GITHUB_WEBHOOK_SECRET = original_secret
+
+
+async def test_github_accepts_valid_signature(client):
+    original_secret = browser.GITHUB_WEBHOOK_SECRET
+    try:
+        secret = "gh_valid_secret"
+        browser.GITHUB_WEBHOOK_SECRET = secret
+        body = json.dumps({"action": "closed", "issue": {"title": "old"}})
+        signature = "sha256=" + hmac.new(
+            secret.encode(), body.encode(), hashlib.sha256
+        ).hexdigest()
+
+        resp = await client.post(
+            "/webhooks/github",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "issues",
+                "X-Hub-Signature-256": signature,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["action"] == "ignored"
     finally:
         browser.GITHUB_WEBHOOK_SECRET = original_secret

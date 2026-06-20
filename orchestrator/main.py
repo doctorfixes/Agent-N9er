@@ -2,10 +2,12 @@ import os
 import sys
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import aiosqlite
 import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -14,6 +16,11 @@ from shared.security import (
     get_service_headers,
 )
 from shared.task_taxonomy import get_specialization_boost, list_categories
+from shared.config import (
+    MAX_RETRIES, RETRY_BACKOFF, DEFAULT_TIMEOUT, PIPELINE_TIMEOUT,
+    QUICK_TIMEOUT, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
+    CORS_ORIGINS,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -24,24 +31,11 @@ MARKETPLACE_URL = os.getenv("MARKETPLACE_URL", "http://localhost:8300")
 EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 RECURRING_URL = os.getenv("RECURRING_URL", "http://localhost:8600")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
-MAX_RETRIES = 3
-RETRY_BACKOFF = 0.3
-
-app = FastAPI(title="Verixio Orchestrator")
-
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)
-app.add_middleware(APIKeyMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
 registered_agents = {}
+_agents_lock = asyncio.Lock()
 
 
 class AgentRegisterRequest(BaseModel):
@@ -57,6 +51,56 @@ class PipelineRequest(BaseModel):
     objective: str = ""
     source: str = "manual"
     inputs: dict = {}
+
+
+async def _init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agents (
+                agent_id TEXT PRIMARY KEY,
+                profile TEXT DEFAULT 'unknown',
+                specialization TEXT DEFAULT 'generalist',
+                price REAL DEFAULT 0.1,
+                eta_minutes INTEGER DEFAULT 5,
+                confidence REAL DEFAULT 0.5
+            )
+        """)
+        await db.commit()
+
+
+async def _load_agents():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM agents")
+        rows = await cursor.fetchall()
+        for row in rows:
+            registered_agents[row["agent_id"]] = {
+                "agent_id": row["agent_id"],
+                "profile": row["profile"],
+                "specialization": row["specialization"],
+                "price": row["price"],
+                "eta_minutes": row["eta_minutes"],
+                "confidence": row["confidence"],
+            }
+    logger.info("Loaded %d agents from database", len(registered_agents))
+
+
+async def _persist_agent(agent_data: dict):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO agents (agent_id, profile, specialization, price, eta_minutes, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_data["agent_id"], agent_data["profile"], agent_data["specialization"],
+             agent_data["price"], agent_data["eta_minutes"], agent_data["confidence"]),
+        )
+        await db.commit()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await _init_db()
+    await _load_agents()
+    yield
 
 
 def _svc_headers(request=None):
@@ -81,16 +125,34 @@ async def _retry_post(client: httpx.AsyncClient, url: str, **kwargs):
     raise last_exc
 
 
+app = FastAPI(title="Verixio Orchestrator", lifespan=lifespan)
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RateLimitMiddleware, max_requests=RATE_LIMIT_MAX_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+app.add_middleware(APIKeyMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/health")
 async def health():
-    return {"ok": 1, "service": "orchestrator", "registered_agents": len(registered_agents)}
+    async with _agents_lock:
+        count = len(registered_agents)
+    return {"ok": 1, "service": "orchestrator", "registered_agents": count}
 
 
 @app.post("/agents/register")
 async def register_agent(agent: AgentRegisterRequest):
-    registered_agents[agent.agent_id] = agent.model_dump()
+    agent_data = agent.model_dump()
+    async with _agents_lock:
+        registered_agents[agent.agent_id] = agent_data
+    await _persist_agent(agent_data)
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=QUICK_TIMEOUT) as client:
             await client.post(
                 f"{REPUTATION_URL}/register",
                 json={"agent_id": agent.agent_id, "profile": agent.profile},
@@ -105,7 +167,8 @@ async def register_agent(agent: AgentRegisterRequest):
 
 @app.get("/agents")
 async def list_agents():
-    return registered_agents
+    async with _agents_lock:
+        return dict(registered_agents)
 
 
 @app.get("/task-categories")
@@ -117,7 +180,7 @@ async def task_categories(tier: str = None):
 async def pipeline(task: dict):
     try:
         svc = _svc_headers()
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             norm_resp = await _retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task, headers=svc)
             normalized = norm_resp.json()
 
@@ -156,13 +219,16 @@ async def full_pipeline(task: dict):
     task_id = pub_result["task_id"]
     category = pub_result.get("normalized", {}).get("category", "uncategorized")
 
-    if not registered_agents:
+    async with _agents_lock:
+        agents_snapshot = dict(registered_agents)
+
+    if not agents_snapshot:
         return {**pub_result, "status": "task_published_no_agents",
                 "detail": "No agents registered to bid"}
 
     try:
         svc = _svc_headers()
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
             async def _submit_bid(agent_id, agent_info):
                 base_confidence = agent_info.get("confidence", 0.5)
                 specialization = agent_info.get("specialization", "generalist")
@@ -182,7 +248,7 @@ async def full_pipeline(task: dict):
                     logger.warning("Failed to submit bid for agent %s", agent_id)
 
             await asyncio.gather(*[
-                _submit_bid(aid, ainfo) for aid, ainfo in registered_agents.items()
+                _submit_bid(aid, ainfo) for aid, ainfo in agents_snapshot.items()
             ])
 
             award_resp = await _retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
@@ -225,7 +291,7 @@ async def full_pipeline(task: dict):
 async def process_recurring():
     try:
         svc = _svc_headers()
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             tick_resp = await client.get(f"{RECURRING_URL}/tick", headers=svc)
             tick_resp.raise_for_status()
             generated_tasks = tick_resp.json()

@@ -1,21 +1,72 @@
 import os
 import sys
 import uuid
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
+import aiosqlite
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.task_taxonomy import list_categories, TaskCategory
+from shared.config import CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("recurring")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+DB_PATH = os.getenv("RECURRING_DB_PATH", "/data/recurring.db")
 
-app = FastAPI(title="Verixio Recurring Engine")
+rules = []
+_rules_lock = asyncio.Lock()
+
+
+async def _init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS rules (
+                rule_id TEXT PRIMARY KEY,
+                objective TEXT NOT NULL,
+                category TEXT DEFAULT 'uncategorized'
+            )
+        """)
+        await db.commit()
+
+
+async def _load_rules():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM rules")
+        rows = await cursor.fetchall()
+        for row in rows:
+            rules.append({
+                "rule_id": row["rule_id"],
+                "objective": row["objective"],
+                "category": row["category"],
+            })
+    logger.info("Loaded %d rules from database", len(rules))
+
+
+async def _persist_rule(rule: dict):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO rules (rule_id, objective, category) VALUES (?, ?, ?)",
+            (rule["rule_id"], rule["objective"], rule.get("category", "uncategorized")),
+        )
+        await db.commit()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await _init_db()
+    await _load_rules()
+    yield
+
+
+app = FastAPI(title="Verixio Recurring Engine", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
@@ -26,12 +77,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-rules = []
-
 
 @app.get("/health")
 async def health():
-    return {"ok": 1, "service": "recurring", "rule_count": len(rules)}
+    async with _rules_lock:
+        count = len(rules)
+    return {"ok": 1, "service": "recurring", "rule_count": count}
 
 
 @app.post("/rules")
@@ -40,20 +91,25 @@ async def add_rule(rule: dict):
         raise HTTPException(status_code=422, detail="Missing objective")
     rule["rule_id"] = str(uuid.uuid4())
     rule.setdefault("category", "uncategorized")
-    rules.append(rule)
+    async with _rules_lock:
+        rules.append(rule)
+    await _persist_rule(rule)
     logger.info("Added rule %s [%s]: %s", rule["rule_id"], rule["category"], rule["objective"][:80])
     return {"ok": 1, "rule": rule}
 
 
 @app.get("/rules")
 async def get_rules():
-    return rules
+    async with _rules_lock:
+        return list(rules)
 
 
 @app.get("/tick")
 async def tick():
+    async with _rules_lock:
+        snapshot = list(rules)
     generated = []
-    for rule in rules:
+    for rule in snapshot:
         task = {
             "id": str(uuid.uuid4()),
             "objective": rule["objective"],
@@ -63,7 +119,7 @@ async def tick():
         }
         generated.append(task)
     if generated:
-        logger.info("Tick generated %d tasks from %d rules", len(generated), len(rules))
+        logger.info("Tick generated %d tasks from %d rules", len(generated), len(snapshot))
     return generated
 
 
