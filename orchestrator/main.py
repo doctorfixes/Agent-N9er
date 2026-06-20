@@ -1,10 +1,18 @@
 import os
+import sys
 import asyncio
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import (
+    RequestIDMiddleware, RateLimitMiddleware, APIKeyMiddleware,
+    get_service_headers,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -15,11 +23,22 @@ MARKETPLACE_URL = os.getenv("MARKETPLACE_URL", "http://localhost:8300")
 EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 RECURRING_URL = os.getenv("RECURRING_URL", "http://localhost:8600")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = 0.3
 
 app = FastAPI(title="Verixio Orchestrator")
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)
+app.add_middleware(APIKeyMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 registered_agents = {}
 
@@ -36,6 +55,13 @@ class PipelineRequest(BaseModel):
     objective: str = ""
     source: str = "manual"
     inputs: dict = {}
+
+
+def _svc_headers(request=None):
+    headers = get_service_headers()
+    if request and hasattr(request, "state") and hasattr(request.state, "request_id"):
+        headers["X-Request-ID"] = request.state.request_id
+    return headers
 
 
 async def _retry_post(client: httpx.AsyncClient, url: str, **kwargs):
@@ -63,9 +89,11 @@ async def register_agent(agent: AgentRegisterRequest):
     registered_agents[agent.agent_id] = agent.model_dump()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(f"{REPUTATION_URL}/register", json={
-                "agent_id": agent.agent_id, "profile": agent.profile,
-            })
+            await client.post(
+                f"{REPUTATION_URL}/register",
+                json={"agent_id": agent.agent_id, "profile": agent.profile},
+                headers=_svc_headers(),
+            )
     except httpx.RequestError:
         pass
     logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
@@ -80,11 +108,12 @@ async def list_agents():
 @app.post("/pipeline")
 async def pipeline(task: dict):
     try:
+        svc = _svc_headers()
         async with httpx.AsyncClient(timeout=10.0) as client:
-            norm_resp = await _retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task)
+            norm_resp = await _retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task, headers=svc)
             normalized = norm_resp.json()
 
-            rank_resp = await _retry_post(client, f"{RANKING_URL}/rank", json=normalized)
+            rank_resp = await _retry_post(client, f"{RANKING_URL}/rank", json=normalized, headers=svc)
             ranked = rank_resp.json()
 
             publish_payload = {
@@ -94,7 +123,7 @@ async def pipeline(task: dict):
                 "inputs": normalized.get("inputs", {}),
                 "source": normalized.get("source", "manual"),
             }
-            await _retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload)
+            await _retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload, headers=svc)
 
             logger.info("Task %s published with priority %.2f", ranked["id"], ranked["priority_score"])
             return {
@@ -121,6 +150,7 @@ async def full_pipeline(task: dict):
                 "detail": "No agents registered to bid"}
 
     try:
+        svc = _svc_headers()
         async with httpx.AsyncClient(timeout=15.0) as client:
             async def _submit_bid(agent_id, agent_info):
                 bid_payload = {
@@ -131,7 +161,7 @@ async def full_pipeline(task: dict):
                     "confidence": agent_info.get("confidence", 0.5),
                 }
                 try:
-                    await client.post(f"{MARKETPLACE_URL}/bid", json=bid_payload)
+                    await client.post(f"{MARKETPLACE_URL}/bid", json=bid_payload, headers=svc)
                 except httpx.RequestError:
                     logger.warning("Failed to submit bid for agent %s", agent_id)
 
@@ -139,7 +169,7 @@ async def full_pipeline(task: dict):
                 _submit_bid(aid, ainfo) for aid, ainfo in registered_agents.items()
             ])
 
-            award_resp = await _retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}")
+            award_resp = await _retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
             award_data = award_resp.json()
             winner = award_data["winner"]
 
@@ -147,12 +177,15 @@ async def full_pipeline(task: dict):
                 "task_id": task_id,
                 "agent_id": winner["agent_id"],
                 "confidence": winner.get("confidence", 0.5),
-            })
+            }, headers=svc)
             exec_data = exec_resp.json()
 
             status = "completed" if exec_data.get("success") else "failed"
-            await client.post(f"{MARKETPLACE_URL}/complete/{task_id}",
-                              json={"success": exec_data.get("success", False)})
+            await client.post(
+                f"{MARKETPLACE_URL}/complete/{task_id}",
+                json={"success": exec_data.get("success", False)},
+                headers=svc,
+            )
 
             logger.info("Full pipeline complete for task %s: %s (agent %s)",
                         task_id, status, winner["agent_id"])
@@ -174,8 +207,9 @@ async def full_pipeline(task: dict):
 @app.post("/process-recurring")
 async def process_recurring():
     try:
+        svc = _svc_headers()
         async with httpx.AsyncClient(timeout=10.0) as client:
-            tick_resp = await client.get(f"{RECURRING_URL}/tick")
+            tick_resp = await client.get(f"{RECURRING_URL}/tick", headers=svc)
             tick_resp.raise_for_status()
             generated_tasks = tick_resp.json()
 

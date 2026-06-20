@@ -28,6 +28,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: service-urls
+            - secretRef:
+                name: auth-secrets
           volumeMounts:
             - name: data
               mountPath: /data

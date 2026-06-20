@@ -1,15 +1,21 @@
 import os
+import sys
 import logging
 from contextlib import asynccontextmanager
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("reputation")
 
 DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 
 class RegisterRequest(BaseModel):
@@ -52,6 +58,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Verixio Reputation Ledger", lifespan=lifespan)
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

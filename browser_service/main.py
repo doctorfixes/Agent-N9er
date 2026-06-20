@@ -1,21 +1,40 @@
 import os
+import sys
 import time
 import logging
 import hashlib
 import hmac
 
 from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import (
+    RequestIDMiddleware, RateLimitMiddleware, APIKeyMiddleware,
+    get_service_headers,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("browser_service")
 
-app = FastAPI(title="Verixio Browser Service")
-
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
+app = FastAPI(title="Verixio Browser Service")
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
+app.add_middleware(APIKeyMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 active_watchers = set()
 
@@ -62,10 +81,11 @@ async def deactivate_watcher(name: str):
 
 
 async def _forward_to_pipeline(task: dict):
+    svc = get_service_headers()
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task)
+                resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task, headers=svc)
                 resp.raise_for_status()
                 result = resp.json()
                 logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))

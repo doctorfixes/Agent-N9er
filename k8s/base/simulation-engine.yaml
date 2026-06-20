@@ -23,6 +23,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: service-urls
+            - secretRef:
+                name: auth-secrets
           resources:
             requests:
               cpu: 100m

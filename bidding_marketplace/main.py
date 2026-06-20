@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -6,12 +7,17 @@ from datetime import datetime, timezone
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("marketplace")
 
 DB_PATH = os.getenv("DB_PATH", "/data/marketplace.db")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 
 class PublishRequest(BaseModel):
@@ -68,12 +74,31 @@ async def init_db():
                 UNIQUE(task_id, agent_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT,
+                detail TEXT,
+                timestamp TEXT NOT NULL
+            )
+        """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_published ON tasks(published_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_bids_task ON bids(task_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_bids_agent ON bids(agent_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(timestamp)")
         await db.commit()
     logger.info("Marketplace database initialized at %s", DB_PATH)
+
+
+async def _audit(db, action: str, entity_type: str, entity_id: str = None, detail: str = None):
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        "INSERT INTO audit_log (action, entity_type, entity_id, detail, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (action, entity_type, entity_id, detail, now),
+    )
 
 
 @asynccontextmanager
@@ -83,6 +108,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Verixio Bidding Marketplace", lifespan=lifespan)
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -106,6 +140,7 @@ async def publish(task: PublishRequest):
             (task.id, task.objective, task.priority_score, "open",
              json.dumps(task.inputs), task.source, now)
         )
+        await _audit(db, "publish", "task", task.id, f"source={task.source}")
         await db.commit()
     finally:
         await db.close()
@@ -151,6 +186,7 @@ async def submit_bid(bid: BidRequest):
             "INSERT OR REPLACE INTO bids (task_id, agent_id, price, eta_minutes, confidence, submitted_at) VALUES (?, ?, ?, ?, ?, ?)",
             (bid.task_id, bid.agent_id, bid.price, bid.eta_minutes, bid.confidence, now)
         )
+        await _audit(db, "bid", "task", bid.task_id, f"agent={bid.agent_id} confidence={bid.confidence}")
         await db.commit()
     finally:
         await db.close()
@@ -191,6 +227,7 @@ async def award_task(task_id: str):
             "UPDATE tasks SET status = 'awarded', awarded_to = ? WHERE id = ?",
             (winning_bid["agent_id"], task_id)
         )
+        await _audit(db, "award", "task", task_id, f"winner={winning_bid['agent_id']}")
         await db.commit()
     finally:
         await db.close()
@@ -205,11 +242,39 @@ async def complete_task(task_id: str, result: CompleteRequest):
     db = await get_db()
     try:
         await db.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        await _audit(db, "complete", "task", task_id, f"status={status}")
         await db.commit()
     finally:
         await db.close()
     logger.info("Task %s marked %s", task_id, status)
     return {"ok": 1}
+
+
+@app.get("/audit")
+async def get_audit_log(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "action": row["action"],
+                "entity_type": row["entity_type"],
+                "entity_id": row["entity_id"],
+                "detail": row["detail"],
+                "timestamp": row["timestamp"],
+            }
+            for row in rows
+        ]
+    finally:
+        await db.close()
 
 
 def _task_from_row(row):

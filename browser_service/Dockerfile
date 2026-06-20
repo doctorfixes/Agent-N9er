@@ -1,9 +1,10 @@
 FROM python:3.12-slim
 RUN addgroup --system app && adduser --system --ingroup app app
 WORKDIR /app
-COPY requirements.txt .
+COPY browser_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py .
+COPY shared/ ./shared/
+COPY browser_service/main.py .
 USER app
 EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')" || exit 1

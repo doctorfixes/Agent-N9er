@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import random
 from contextlib import asynccontextmanager
@@ -7,13 +8,18 @@ from datetime import datetime, timezone
 import aiosqlite
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_service_headers
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("execution")
 
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 DB_PATH = os.getenv("DB_PATH", "/data/execution.db")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = 0.5
@@ -59,6 +65,15 @@ async def lifespan(app):
 
 app = FastAPI(title="Verixio Agent Execution", lifespan=lifespan)
 
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
 async def health():
@@ -87,13 +102,15 @@ async def execute(request: ExecuteRequest):
     finally:
         await db.close()
 
+    svc = get_service_headers()
     for attempt in range(MAX_RETRIES):
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(f"{REPUTATION_URL}/update", json={
-                    "agent_id": request.agent_id,
-                    "success": success,
-                })
+                await client.post(
+                    f"{REPUTATION_URL}/update",
+                    json={"agent_id": request.agent_id, "success": success},
+                    headers=svc,
+                )
             break
         except httpx.RequestError as e:
             if attempt == MAX_RETRIES - 1:

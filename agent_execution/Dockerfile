@@ -1,9 +1,10 @@
 FROM python:3.12-slim
 RUN addgroup --system app && adduser --system --ingroup app app
 WORKDIR /app
-COPY requirements.txt .
+COPY agent_execution/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py .
+COPY shared/ ./shared/
+COPY agent_execution/main.py .
 RUN mkdir -p /data && chown app:app /data
 USER app
 EXPOSE 8400

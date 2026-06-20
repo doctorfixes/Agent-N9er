@@ -25,6 +25,9 @@ spec:
           env:
             - name: DB_PATH
               value: /data/reputation.db
+          envFrom:
+            - secretRef:
+                name: auth-secrets
           volumeMounts:
             - name: data
               mountPath: /data

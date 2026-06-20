@@ -1,13 +1,30 @@
+import os
+import sys
 import uuid
 import logging
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("normalization")
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 app = FastAPI(title="Verixio Normalization Service")
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 class NormalizeRequest(BaseModel):
