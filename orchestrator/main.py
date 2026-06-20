@@ -2,7 +2,7 @@ from fastapi import FastAPI
 import httpx
 app=FastAPI()
 @app.post("/pipeline")
-async def p(t):
+async def p(t: dict):
  async with httpx.AsyncClient()as c:
   n=(await c.post("http://normalization-service:8100/normalize",json=t)).json()
   r=(await c.post("http://ranking-engine:8200/rank",json=n)).json()
