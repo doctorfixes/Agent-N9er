@@ -90,7 +90,7 @@ class TestScan:
         assert resp.json()["new"] == 0
 
     async def test_scan_unsupported_platform(self, client):
-        resp = await client.post("/scan", json={"platform": "fiverr"})
+        resp = await client.post("/scan", json={"platform": "nonexistent_platform"})
         assert resp.status_code == 400
 
 
@@ -198,3 +198,35 @@ class TestBudgetParsing:
 
     def test_no_budget(self):
         assert prospector._extract_budget("No money mentioned", "min") == 0
+
+
+class TestPlatforms:
+    async def test_platforms_list(self, client):
+        resp = await client.get("/platforms")
+        data = resp.json()
+        assert len(data) == 19
+        names = [p["name"] for p in data]
+        assert "upwork" in names
+        assert "github_bounties" in names
+        assert "superteam_earn" in names
+        assert "gitcoin" in names
+        assert "topcoder" in names
+        assert "hackerone" in names
+        assert "kaggle" in names
+        assert "algora" in names
+        assert "onlydust" in names
+        assert "freelancer" in names
+
+    async def test_all_platforms_have_scanners(self, client):
+        resp = await client.get("/platforms")
+        for p in resp.json():
+            assert p["name"] in prospector.SCANNERS, f"Missing scanner for {p['name']}"
+
+    async def test_platform_entries_have_required_fields(self, client):
+        resp = await client.get("/platforms")
+        for p in resp.json():
+            assert "name" in p
+            assert "label" in p
+            assert "status" in p
+            assert "type" in p
+            assert "description" in p

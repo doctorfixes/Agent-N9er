@@ -73,13 +73,23 @@ export default function ProspectsPage() {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <h1 style={{ margin: 0, fontSize: "22px", fontWeight: 700, color: "#111827" }}>Prospect Pipeline</h1>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            id="platform-select"
+            defaultValue="upwork"
+            style={{ padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, background: "white" }}
+          >
+            {platforms && platforms.map((p) => (
+              <option key={p.name} value={p.name}>{p.label}</option>
+            ))}
+            {!platforms && <option value="upwork">Upwork</option>}
+          </select>
           <button
-            onClick={() => handleScan("upwork")}
+            onClick={() => handleScan(document.getElementById("platform-select").value)}
             disabled={scanning}
             style={{ padding: "8px 16px", background: "#111827", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 500 }}
           >
-            {scanning ? "Scanning..." : "Scan Upwork"}
+            {scanning ? "Scanning..." : "Scan"}
           </button>
         </div>
       </div>

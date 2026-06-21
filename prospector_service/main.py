@@ -1,7 +1,10 @@
 import os
 import sys
+import re
+import json
 import uuid
 import logging
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -28,10 +31,135 @@ UPWORK_SEARCH_CATEGORIES = os.getenv(
     "web-development,data-science,ai-ml,writing,software-development"
 ).split(",")
 
+GITHUB_API = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
     "hired", "executing", "delivered", "paid", "rated", "rejected",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Platform registry
+# ---------------------------------------------------------------------------
+
+PLATFORMS = {
+    "upwork": {
+        "label": "Upwork",
+        "status": "active",
+        "type": "rss",
+        "description": "Freelance marketplace — all digital work",
+    },
+    "github_bounties": {
+        "label": "GitHub Bounties",
+        "status": "active",
+        "type": "api",
+        "description": "Open-source issue bounties on GitHub",
+    },
+    "superteam_earn": {
+        "label": "Superteam Earn",
+        "status": "active",
+        "type": "scrape",
+        "description": "Solana ecosystem bounties — dev, content, design",
+    },
+    "gitcoin": {
+        "label": "Gitcoin",
+        "status": "active",
+        "type": "api",
+        "description": "Ethereum/multi-chain open-source bounties",
+    },
+    "dework": {
+        "label": "Dework",
+        "status": "active",
+        "type": "api",
+        "description": "DAO task boards — dev, design, community",
+    },
+    "layer3": {
+        "label": "Layer3",
+        "status": "active",
+        "type": "api",
+        "description": "Multi-chain quests and bounties",
+    },
+    "replit_bounties": {
+        "label": "Replit Bounties",
+        "status": "active",
+        "type": "api",
+        "description": "Code bounties on Replit",
+    },
+    "zealy": {
+        "label": "Zealy",
+        "status": "active",
+        "type": "api",
+        "description": "Community quests — content, growth tasks",
+    },
+    "galxe": {
+        "label": "Galxe",
+        "status": "active",
+        "type": "api",
+        "description": "Multi-chain campaign quests and tasks",
+    },
+    "questbook": {
+        "label": "Questbook",
+        "status": "active",
+        "type": "api",
+        "description": "Protocol-funded developer grants",
+    },
+    "onlydust": {
+        "label": "OnlyDust",
+        "status": "active",
+        "type": "api",
+        "description": "GitHub-linked bounties for web3 projects",
+    },
+    "freelancer": {
+        "label": "Freelancer.com",
+        "status": "active",
+        "type": "api",
+        "description": "Freelance contests and fixed/hourly projects",
+    },
+    "fiverr": {
+        "label": "Fiverr",
+        "status": "active",
+        "type": "scrape",
+        "description": "Task-based gigs across all categories",
+    },
+    "topcoder": {
+        "label": "Topcoder",
+        "status": "active",
+        "type": "api",
+        "description": "Algorithm, development, and design challenges",
+    },
+    "hackerone": {
+        "label": "HackerOne",
+        "status": "active",
+        "type": "api",
+        "description": "Security vulnerability bounties",
+    },
+    "bugcrowd": {
+        "label": "Bugcrowd",
+        "status": "active",
+        "type": "api",
+        "description": "Enterprise bug bounty programs",
+    },
+    "kaggle": {
+        "label": "Kaggle",
+        "status": "active",
+        "type": "api",
+        "description": "Data science and ML competitions",
+    },
+    "issuehunt": {
+        "label": "IssueHunt",
+        "status": "active",
+        "type": "api",
+        "description": "Fund and solve GitHub issues",
+    },
+    "algora": {
+        "label": "Algora",
+        "status": "active",
+        "type": "api",
+        "description": "Open-source bounties with Stripe payouts",
+    },
+}
 
 
 class ScanRequest(BaseModel):
@@ -108,12 +236,30 @@ async def health():
         return {"ok": 0, "service": "prospector", "error": "db_unreachable"}
 
 
+# ---------------------------------------------------------------------------
+# Scan dispatcher
+# ---------------------------------------------------------------------------
+
+SCANNERS = {}
+
+
+def scanner(platform_name):
+    def decorator(fn):
+        SCANNERS[platform_name] = fn
+        return fn
+    return decorator
+
+
 @app.post("/scan")
 async def scan(req: ScanRequest):
-    if req.platform == "upwork":
-        prospects = await _scan_upwork(req.query, req.category, req.max_results)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported platform: {req.platform}")
+    if req.platform not in PLATFORMS:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {req.platform}")
+
+    scan_fn = SCANNERS.get(req.platform)
+    if not scan_fn:
+        raise HTTPException(status_code=400, detail=f"No scanner implemented for: {req.platform}")
+
+    prospects = await scan_fn(req.query, req.category, req.max_results)
 
     saved = 0
     for p in prospects:
@@ -126,6 +272,28 @@ async def scan(req: ScanRequest):
     return {"ok": 1, "discovered": len(prospects), "new": saved, "platform": req.platform}
 
 
+# ---------------------------------------------------------------------------
+# Platform scanners
+# ---------------------------------------------------------------------------
+
+def _make_prospect(platform: str, job_id: str, title: str, description: str,
+                   budget_min: float = 0, budget_max: float = 0,
+                   url: str = "", skills: str = "") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "platform": platform,
+        "platform_job_id": job_id,
+        "title": title,
+        "description": description,
+        "budget_min": budget_min,
+        "budget_max": budget_max,
+        "url": url,
+        "skills": skills,
+        "status": "discovered",
+    }
+
+
+@scanner("upwork")
 async def _scan_upwork(query: str, category: str, max_results: int) -> list[dict]:
     params = {"sort": "recency", "paging": f"0;{max_results}"}
     if query:
@@ -141,26 +309,631 @@ async def _scan_upwork(query: str, category: str, max_results: int) -> list[dict
             items = _parse_rss(resp.text)
 
             for item in items[:max_results]:
-                prospects.append({
-                    "id": str(uuid.uuid4()),
-                    "platform": "upwork",
-                    "platform_job_id": item.get("guid", str(uuid.uuid4())),
-                    "title": item.get("title", "Untitled"),
-                    "description": item.get("description", ""),
-                    "budget_min": _extract_budget(item.get("description", ""), "min"),
-                    "budget_max": _extract_budget(item.get("description", ""), "max"),
-                    "url": item.get("link", ""),
-                    "skills": item.get("skills", ""),
-                    "status": "discovered",
-                })
+                desc = item.get("description", "")
+                prospects.append(_make_prospect(
+                    platform="upwork",
+                    job_id=item.get("guid", str(uuid.uuid4())),
+                    title=item.get("title", "Untitled"),
+                    description=desc,
+                    budget_min=_extract_budget(desc, "min"),
+                    budget_max=_extract_budget(desc, "max"),
+                    url=item.get("link", ""),
+                    skills=item.get("skills", ""),
+                ))
     except httpx.RequestError as e:
         logger.warning("Upwork RSS fetch failed: %s", e)
 
     return prospects
 
 
+@scanner("github_bounties")
+async def _scan_github(query: str, category: str, max_results: int) -> list[dict]:
+    search_query = query or "label:bounty state:open"
+    if "label:" not in search_query:
+        search_query += " label:bounty"
+    if "state:" not in search_query:
+        search_query += " state:open"
+
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{GITHUB_API}/search/issues",
+                params={"q": search_query, "sort": "created", "order": "desc", "per_page": max_results},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for issue in data.get("items", [])[:max_results]:
+                body = issue.get("body", "") or ""
+                budget = _extract_budget(body, "max")
+                prospects.append(_make_prospect(
+                    platform="github_bounties",
+                    job_id=str(issue["id"]),
+                    title=issue.get("title", ""),
+                    description=body[:2000],
+                    budget_min=0,
+                    budget_max=budget,
+                    url=issue.get("html_url", ""),
+                    skills=",".join(l["name"] for l in issue.get("labels", [])),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("GitHub search failed: %s", e)
+
+    return prospects
+
+
+@scanner("superteam_earn")
+async def _scan_superteam(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://earn.superteam.fun/api/listings",
+                params={"take": max_results, "type": "bounty"},
+            )
+            resp.raise_for_status()
+            listings = resp.json()
+            if isinstance(listings, dict):
+                listings = listings.get("bounties", listings.get("listings", []))
+
+            for item in listings[:max_results]:
+                title = item.get("title", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                reward = item.get("rewardAmount", 0) or item.get("usdValue", 0) or 0
+                prospects.append(_make_prospect(
+                    platform="superteam_earn",
+                    job_id=str(item.get("id", uuid.uuid4())),
+                    title=title,
+                    description=item.get("description", "")[:2000],
+                    budget_min=0,
+                    budget_max=float(reward),
+                    url=item.get("url", f"https://earn.superteam.fun/listings/{item.get('slug', '')}"),
+                    skills=",".join(item.get("skills", [])) if isinstance(item.get("skills"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Superteam Earn fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("gitcoin")
+async def _scan_gitcoin(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://gitcoin.co/api/v0.1/bounties/",
+                params={"is_open": "true", "order_by": "-web3_created", "limit": max_results,
+                        **({"keyword": query} if query else {})},
+            )
+            resp.raise_for_status()
+            bounties = resp.json()
+
+            for b in bounties[:max_results]:
+                prospects.append(_make_prospect(
+                    platform="gitcoin",
+                    job_id=str(b.get("pk", uuid.uuid4())),
+                    title=b.get("title", ""),
+                    description=(b.get("issue_description_text", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=float(b.get("value_in_usdt", 0) or 0),
+                    url=b.get("url", ""),
+                    skills=",".join(b.get("keywords", [])) if isinstance(b.get("keywords"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Gitcoin fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("dework")
+async def _scan_dework(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        gql_query = {
+            "query": """query { tasks(filter: { status: TODO }, pagination: { limit: %d }) {
+                id title description reward { amount currency } permalink tags { label }
+            }}""" % max_results
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post("https://api.dework.xyz/graphql", json=gql_query)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for task in (data.get("data", {}).get("tasks", []))[:max_results]:
+                title = task.get("title", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                reward = task.get("reward", {}) or {}
+                amount = float(reward.get("amount", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="dework",
+                    job_id=str(task.get("id", uuid.uuid4())),
+                    title=title,
+                    description=(task.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=amount,
+                    url=task.get("permalink", ""),
+                    skills=",".join(t.get("label", "") for t in task.get("tags", [])),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Dework fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("layer3")
+async def _scan_layer3(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.layer3.xyz/v1/quests",
+                params={"limit": max_results, "status": "active",
+                        **({"search": query} if query else {})},
+            )
+            resp.raise_for_status()
+            quests = resp.json()
+            if isinstance(quests, dict):
+                quests = quests.get("quests", quests.get("data", []))
+
+            for q in quests[:max_results]:
+                reward = q.get("reward", {}) or {}
+                amount = float(reward.get("amount", 0) or q.get("xp", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="layer3",
+                    job_id=str(q.get("id", uuid.uuid4())),
+                    title=q.get("title", q.get("name", "")),
+                    description=(q.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=amount,
+                    url=q.get("url", ""),
+                    skills=",".join(q.get("tags", [])) if isinstance(q.get("tags"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Layer3 fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("replit_bounties")
+async def _scan_replit(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://replit.com/api/v1/bounties",
+                params={"status": "open", "limit": max_results,
+                        **({"query": query} if query else {})},
+            )
+            resp.raise_for_status()
+            bounties = resp.json()
+            if isinstance(bounties, dict):
+                bounties = bounties.get("items", bounties.get("bounties", []))
+
+            for b in bounties[:max_results]:
+                prospects.append(_make_prospect(
+                    platform="replit_bounties",
+                    job_id=str(b.get("id", uuid.uuid4())),
+                    title=b.get("title", ""),
+                    description=(b.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=float(b.get("amount", 0) or b.get("cycles", 0) or 0),
+                    url=b.get("url", ""),
+                    skills=",".join(b.get("tags", [])) if isinstance(b.get("tags"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Replit bounties fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("zealy")
+async def _scan_zealy(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.zealy.io/public/communities",
+                params={"limit": max_results},
+            )
+            resp.raise_for_status()
+            communities = resp.json()
+            if isinstance(communities, dict):
+                communities = communities.get("communities", communities.get("data", []))
+
+            for c in communities[:max_results]:
+                name = c.get("name", "")
+                if query and query.lower() not in name.lower():
+                    continue
+                prospects.append(_make_prospect(
+                    platform="zealy",
+                    job_id=str(c.get("id", uuid.uuid4())),
+                    title=f"Zealy Quest: {name}",
+                    description=(c.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=0,
+                    url=c.get("url", f"https://zealy.io/c/{c.get('subdomain', '')}"),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Zealy fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("galxe")
+async def _scan_galxe(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        gql = {
+            "query": """query { campaigns(input: { chains: [], status: Active, first: %d }) {
+                list { id name description numNFTMinted loyaltyPoints chain }
+            }}""" % max_results
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post("https://graphigo.prd.galaxy.eco/query", json=gql)
+            resp.raise_for_status()
+            data = resp.json()
+
+            campaigns = data.get("data", {}).get("campaigns", {}).get("list", [])
+            for c in campaigns[:max_results]:
+                title = c.get("name", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                prospects.append(_make_prospect(
+                    platform="galxe",
+                    job_id=str(c.get("id", uuid.uuid4())),
+                    title=title,
+                    description=(c.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=float(c.get("loyaltyPoints", 0) or 0),
+                    url=f"https://galxe.com/campaign/{c.get('id', '')}",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Galxe fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("questbook")
+async def _scan_questbook(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.questbook.app/api/grants",
+                params={"status": "open", "limit": max_results},
+            )
+            resp.raise_for_status()
+            grants = resp.json()
+            if isinstance(grants, dict):
+                grants = grants.get("grants", grants.get("data", []))
+
+            for g in grants[:max_results]:
+                title = g.get("title", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                reward = float(g.get("reward", 0) or g.get("funding", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="questbook",
+                    job_id=str(g.get("id", uuid.uuid4())),
+                    title=title,
+                    description=(g.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=reward,
+                    url=g.get("url", ""),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Questbook fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("onlydust")
+async def _scan_onlydust(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.onlydust.com/api/v1/projects",
+                params={"pageSize": max_results},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            projects = data.get("projects", data.get("data", []))
+
+            for p in projects[:max_results]:
+                title = p.get("name", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                prospects.append(_make_prospect(
+                    platform="onlydust",
+                    job_id=str(p.get("id", uuid.uuid4())),
+                    title=f"OnlyDust: {title}",
+                    description=(p.get("shortDescription", p.get("description", "")) or "")[:2000],
+                    budget_min=0,
+                    budget_max=0,
+                    url=p.get("htmlUrl", f"https://app.onlydust.com/p/{p.get('slug', '')}"),
+                    skills=",".join(p.get("technologies", [])) if isinstance(p.get("technologies"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("OnlyDust fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("freelancer")
+async def _scan_freelancer(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            params = {"compact": "true", "limit": max_results, "sort_field": "time_updated",
+                      "project_types[]": "fixed"}
+            if query:
+                params["query"] = query
+            resp = await client.get("https://www.freelancer.com/api/projects/0.1/projects/active/", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for proj in data.get("result", {}).get("projects", [])[:max_results]:
+                budget = proj.get("budget", {}) or {}
+                prospects.append(_make_prospect(
+                    platform="freelancer",
+                    job_id=str(proj.get("id", uuid.uuid4())),
+                    title=proj.get("title", ""),
+                    description=(proj.get("preview_description", "") or "")[:2000],
+                    budget_min=float(budget.get("minimum", 0) or 0),
+                    budget_max=float(budget.get("maximum", 0) or 0),
+                    url=f"https://www.freelancer.com/projects/{proj.get('seo_url', '')}",
+                    skills=",".join(j.get("name", "") for j in proj.get("jobs", [])),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Freelancer.com fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("fiverr")
+async def _scan_fiverr(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            params = {"query": query or "python developer", "limit": max_results}
+            resp = await client.get("https://www.fiverr.com/api/v1/buyer_requests", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            requests = data.get("buyer_requests", data.get("data", []))
+
+            for br in requests[:max_results]:
+                prospects.append(_make_prospect(
+                    platform="fiverr",
+                    job_id=str(br.get("id", uuid.uuid4())),
+                    title=br.get("title", br.get("description", "")[:80]),
+                    description=(br.get("description", "") or "")[:2000],
+                    budget_min=float(br.get("budget_min", 0) or 0),
+                    budget_max=float(br.get("budget_max", br.get("budget", 0)) or 0),
+                    url=br.get("url", ""),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Fiverr fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("topcoder")
+async def _scan_topcoder(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            params = {"status": "Active", "perPage": max_results, "sortBy": "startDate", "sortOrder": "desc"}
+            if query:
+                params["name"] = query
+            resp = await client.get("https://api.topcoder.com/v5/challenges", params=params)
+            resp.raise_for_status()
+            challenges = resp.json()
+
+            for ch in challenges[:max_results]:
+                prizes = ch.get("prizeSets", [])
+                total_prize = 0
+                for ps in prizes:
+                    for p in ps.get("prizes", []):
+                        total_prize += float(p.get("value", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="topcoder",
+                    job_id=str(ch.get("id", uuid.uuid4())),
+                    title=ch.get("name", ""),
+                    description=(ch.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=total_prize,
+                    url=f"https://www.topcoder.com/challenges/{ch.get('id', '')}",
+                    skills=",".join(ch.get("tags", [])) if isinstance(ch.get("tags"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Topcoder fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("hackerone")
+async def _scan_hackerone(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.hackerone.com/v1/hackers/programs",
+                params={"page[size]": max_results},
+                auth=("", ""),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for prog in data.get("data", [])[:max_results]:
+                attrs = prog.get("attributes", {})
+                title = attrs.get("name", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                bounty_range = attrs.get("meta", {}).get("bounty_range", {}) or {}
+                prospects.append(_make_prospect(
+                    platform="hackerone",
+                    job_id=str(prog.get("id", uuid.uuid4())),
+                    title=f"Bug Bounty: {title}",
+                    description=(attrs.get("policy", "") or "")[:2000],
+                    budget_min=float(bounty_range.get("min", 0) or 0),
+                    budget_max=float(bounty_range.get("max", 0) or 0),
+                    url=attrs.get("url", f"https://hackerone.com/{attrs.get('handle', '')}"),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("HackerOne fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("bugcrowd")
+async def _scan_bugcrowd(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://bugcrowd.com/programs.json",
+                params={"sort[]": "promoted-desc", "hidden[]": "false", "page": 1},
+            )
+            resp.raise_for_status()
+            programs = resp.json()
+            if isinstance(programs, dict):
+                programs = programs.get("programs", [])
+
+            for prog in programs[:max_results]:
+                title = prog.get("name", "")
+                if query and query.lower() not in title.lower():
+                    continue
+                max_reward = float(prog.get("max_payout", 0) or prog.get("max_reward", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="bugcrowd",
+                    job_id=str(prog.get("id", prog.get("code", uuid.uuid4()))),
+                    title=f"Bug Bounty: {title}",
+                    description=(prog.get("description", prog.get("tagline", "")) or "")[:2000],
+                    budget_min=0,
+                    budget_max=max_reward,
+                    url=prog.get("url", f"https://bugcrowd.com/{prog.get('code', '')}"),
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Bugcrowd fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("kaggle")
+async def _scan_kaggle(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://www.kaggle.com/api/v1/competitions/list",
+                params={"sortBy": "latestDeadline", "page": 1, "group": "general",
+                        **({"search": query} if query else {})},
+            )
+            resp.raise_for_status()
+            comps = resp.json()
+
+            for c in comps[:max_results]:
+                reward = c.get("reward", "")
+                amount = 0
+                if reward:
+                    match = re.search(r"\$?([\d,]+)", str(reward))
+                    if match:
+                        amount = float(match.group(1).replace(",", ""))
+                prospects.append(_make_prospect(
+                    platform="kaggle",
+                    job_id=str(c.get("id", c.get("ref", uuid.uuid4()))),
+                    title=c.get("title", ""),
+                    description=(c.get("description", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=amount,
+                    url=c.get("url", f"https://www.kaggle.com/competitions/{c.get('ref', '')}"),
+                    skills=",".join(c.get("tags", [])) if isinstance(c.get("tags"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Kaggle fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("issuehunt")
+async def _scan_issuehunt(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.issuehunt.io/v1/issues",
+                params={"limit": max_results, "sort": "newest",
+                        **({"q": query} if query else {})},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            issues = data.get("issues", data.get("data", []))
+
+            for issue in issues[:max_results]:
+                amount = float(issue.get("total_amount", 0) or issue.get("bounty_amount", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="issuehunt",
+                    job_id=str(issue.get("id", uuid.uuid4())),
+                    title=issue.get("title", ""),
+                    description=(issue.get("body", "") or "")[:2000],
+                    budget_min=0,
+                    budget_max=amount,
+                    url=issue.get("html_url", issue.get("url", "")),
+                    skills=",".join(issue.get("labels", [])) if isinstance(issue.get("labels"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("IssueHunt fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("algora")
+async def _scan_algora(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.algora.io/bounties",
+                params={"status": "open", "limit": max_results,
+                        **({"search": query} if query else {})},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            bounties = data.get("bounties", data.get("data", []))
+
+            for b in bounties[:max_results]:
+                amount = float(b.get("reward_amount", 0) or b.get("amount", 0) or 0)
+                prospects.append(_make_prospect(
+                    platform="algora",
+                    job_id=str(b.get("id", uuid.uuid4())),
+                    title=b.get("title", ""),
+                    description=(b.get("description", b.get("body", "")) or "")[:2000],
+                    budget_min=0,
+                    budget_max=amount,
+                    url=b.get("url", b.get("html_url", "")),
+                    skills=",".join(b.get("labels", [])) if isinstance(b.get("labels"), list) else "",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("Algora fetch failed: %s", e)
+
+    return prospects
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _parse_rss(xml_text: str) -> list[dict]:
-    import xml.etree.ElementTree as ET
     items = []
     try:
         root = ET.fromstring(xml_text)
@@ -176,7 +949,6 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def _extract_budget(description: str, which: str) -> float:
-    import re
     patterns = [
         r"\$(\d[\d,]*(?:\.\d{2})?)",
         r"Budget:\s*\$(\d[\d,]*(?:\.\d{2})?)\s*-\s*\$(\d[\d,]*(?:\.\d{2})?)",
@@ -192,6 +964,10 @@ def _extract_budget(description: str, which: str) -> float:
                 return float(groups[0].replace(",", ""))
     return 0
 
+
+# ---------------------------------------------------------------------------
+# Prospect CRUD
+# ---------------------------------------------------------------------------
 
 @app.get("/prospects")
 async def list_prospects(status: str = "", platform: str = "", limit: int = 50):
@@ -329,8 +1105,9 @@ async def stats():
 @app.get("/platforms")
 async def platforms():
     return [
-        {"name": "upwork", "status": "active", "type": "rss"},
-        {"name": "github_bounties", "status": "planned", "type": "api"},
+        {"name": key, "label": val["label"], "status": val["status"],
+         "type": val["type"], "description": val["description"]}
+        for key, val in PLATFORMS.items()
     ]
 
 
