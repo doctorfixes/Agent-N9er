@@ -298,6 +298,14 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - AUTO_EVALUATE=${AUTO_EVALUATE:-false}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
+      - NOTIFY_MIN_BUDGET=${NOTIFY_MIN_BUDGET:-100}
     volumes:
       - prospector-data:/data
     depends_on:

@@ -4,9 +4,12 @@ import re
 import json
 import uuid
 import logging
+import smtplib
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import aiosqlite
 import httpx
@@ -24,6 +27,14 @@ logger = logging.getLogger("prospector")
 DB_PATH = os.getenv("PROSPECTOR_DB_PATH", "/data/prospector.db")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
+
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "")
+NOTIFY_MIN_BUDGET = float(os.getenv("NOTIFY_MIN_BUDGET", "100"))
+AUTO_EVALUATE = os.getenv("AUTO_EVALUATE", "false").lower() == "true"
 
 UPWORK_RSS_BASE = "https://www.upwork.com/ab/feed/jobs/rss"
 UPWORK_SEARCH_CATEGORIES = os.getenv(
@@ -209,6 +220,18 @@ async def _init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_prospect_dedup
+            ON prospects (platform, platform_job_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prospect_status
+            ON prospects (status)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prospect_platform
+            ON prospects (platform, created_at DESC)
+        """)
         await db.commit()
 
 
@@ -262,11 +285,19 @@ async def scan(req: ScanRequest):
     prospects = await scan_fn(req.query, req.category, req.max_results)
 
     saved = 0
+    new_prospects = []
     for p in prospects:
-        existing = await _get_by_platform_id(p["platform"], p["platform_job_id"])
-        if not existing:
-            await _save_prospect(p)
+        if await _save_prospect_dedup(p):
             saved += 1
+            new_prospects.append(p)
+
+    high_value = [p for p in new_prospects if p.get("budget_max", 0) >= NOTIFY_MIN_BUDGET]
+    if high_value:
+        _send_prospect_alert(high_value)
+
+    if AUTO_EVALUATE and new_prospects:
+        evaluated = await _auto_evaluate_batch(new_prospects)
+        logger.info("Auto-evaluated %d/%d new prospects", evaluated, len(new_prospects))
 
     logger.info("Scan complete: %d discovered, %d new on %s", len(prospects), saved, req.platform)
     return {"ok": 1, "discovered": len(prospects), "new": saved, "platform": req.platform}
@@ -927,6 +958,96 @@ async def _scan_algora(query: str, category: str, max_results: int) -> list[dict
         logger.warning("Algora fetch failed: %s", e)
 
     return prospects
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+def _send_prospect_alert(prospects: list[dict]):
+    if not SMTP_HOST or not NOTIFY_EMAIL:
+        logger.info("Skipping email alert: SMTP not configured (%d high-value prospects)", len(prospects))
+        return
+
+    subject = f"Agent N9er: {len(prospects)} high-value prospect(s) discovered"
+
+    lines = []
+    for p in prospects[:20]:
+        budget = f"${p.get('budget_max', 0):,.0f}" if p.get("budget_max") else "TBD"
+        lines.append(f"  [{p['platform']}] {p['title'][:80]}  —  {budget}")
+        if p.get("url"):
+            lines.append(f"    {p['url']}")
+        lines.append("")
+
+    body = (
+        f"Agent N9er discovered {len(prospects)} prospect(s) above ${NOTIFY_MIN_BUDGET:,.0f}:\n\n"
+        + "\n".join(lines)
+        + "\n\nLogin to the command center to review and evaluate."
+    )
+
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_USER or "agent-n9er@noreply.com"
+    msg["To"] = NOTIFY_EMAIL
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            if SMTP_USER and SMTP_PASS:
+                server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        logger.info("Sent prospect alert to %s (%d prospects)", NOTIFY_EMAIL, len(prospects))
+    except Exception as e:
+        logger.warning("Failed to send prospect alert: %s", e)
+
+
+async def _auto_evaluate_batch(prospects: list[dict]) -> int:
+    evaluated = 0
+    for p in prospects:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{EVALUATOR_URL}/evaluate",
+                    json={
+                        "title": p["title"],
+                        "description": p.get("description", ""),
+                        "platform": p["platform"],
+                        "budget_min": p.get("budget_min", 0),
+                        "budget_max": p.get("budget_max", 0),
+                        "skills_required": p.get("skills", "").split(",") if p.get("skills") else [],
+                    },
+                    headers=_svc_headers(),
+                )
+                resp.raise_for_status()
+                evaluation = resp.json()
+
+            new_status = "approved" if evaluation.get("viable") else "rejected"
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE prospects SET status = ?, evaluation_id = ?, quoted_price = ?, estimated_cost = ? WHERE id = ?",
+                    (new_status, evaluation.get("evaluation_id", ""), evaluation.get("quoted_price_usd", 0),
+                     evaluation.get("estimated_cost_usd", 0), p["id"]),
+                )
+                await db.commit()
+            evaluated += 1
+        except Exception as e:
+            logger.warning("Auto-evaluate failed for %s: %s", p["id"][:8], e)
+    return evaluated
+
+
+async def _save_prospect_dedup(p: dict) -> bool:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO prospects (id, platform, platform_job_id, title, description, budget_min, budget_max, skills, status, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (p["id"], p["platform"], p["platform_job_id"], p["title"], p["description"],
+                 p["budget_min"], p["budget_max"], p.get("skills", ""), p["status"], p.get("url", "")),
+            )
+            await db.commit()
+            return db.total_changes > 0
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

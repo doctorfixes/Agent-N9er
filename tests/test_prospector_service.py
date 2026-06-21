@@ -200,6 +200,98 @@ class TestBudgetParsing:
         assert prospector._extract_budget("No money mentioned", "min") == 0
 
 
+class TestDeduplication:
+    async def test_dedup_insert_or_ignore(self, client):
+        p = {
+            "id": "d1", "platform": "upwork", "platform_job_id": "dup-1",
+            "title": "Dup Job", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "discovered", "skills": "",
+        }
+        result1 = await prospector._save_prospect_dedup(p)
+        assert result1 is True
+
+        p2 = dict(p, id="d2")
+        result2 = await prospector._save_prospect_dedup(p2)
+        assert result2 is False
+
+    async def test_dedup_different_platforms_allowed(self, client):
+        p1 = {
+            "id": "d3", "platform": "upwork", "platform_job_id": "same-id",
+            "title": "Job 1", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "discovered", "skills": "",
+        }
+        p2 = {
+            "id": "d4", "platform": "freelancer", "platform_job_id": "same-id",
+            "title": "Job 2", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "discovered", "skills": "",
+        }
+        assert await prospector._save_prospect_dedup(p1) is True
+        assert await prospector._save_prospect_dedup(p2) is True
+
+
+class TestNotifications:
+    def test_send_alert_skips_without_smtp(self):
+        original = prospector.SMTP_HOST
+        prospector.SMTP_HOST = ""
+        try:
+            prospector._send_prospect_alert([{"platform": "upwork", "title": "Test", "budget_max": 500}])
+        finally:
+            prospector.SMTP_HOST = original
+
+    @patch("smtplib.SMTP")
+    def test_send_alert_with_smtp(self, mock_smtp_class):
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
+        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+
+        original_host = prospector.SMTP_HOST
+        original_email = prospector.NOTIFY_EMAIL
+        prospector.SMTP_HOST = "smtp.test.com"
+        prospector.NOTIFY_EMAIL = "test@test.com"
+        try:
+            prospector._send_prospect_alert([
+                {"platform": "upwork", "title": "High Value Job", "budget_max": 1000, "url": "https://example.com"},
+            ])
+            mock_smtp_class.assert_called_once()
+        finally:
+            prospector.SMTP_HOST = original_host
+            prospector.NOTIFY_EMAIL = original_email
+
+
+class TestAutoEvaluate:
+    async def test_auto_evaluate_calls_evaluator(self, client):
+        await prospector._save_prospect_dedup({
+            "id": "ae1", "platform": "upwork", "platform_job_id": "ae-job-1",
+            "title": "Auto Eval Job", "description": "Build something",
+            "budget_min": 100, "budget_max": 500, "status": "discovered", "skills": "python",
+        })
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={
+            "evaluation_id": "eval-1", "viable": True,
+            "quoted_price_usd": 450, "estimated_cost_usd": 150,
+        })
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            count = await prospector._auto_evaluate_batch([{
+                "id": "ae1", "platform": "upwork", "title": "Auto Eval Job",
+                "description": "Build something", "budget_min": 100, "budget_max": 500,
+                "skills": "python",
+            }])
+
+        assert count == 1
+
+        prospect = (await client.get("/prospects/ae1")).json()
+        assert prospect["status"] == "approved"
+        assert prospect["quoted_price"] == 450
+
+
 class TestPlatforms:
     async def test_platforms_list(self, client):
         resp = await client.get("/platforms")
