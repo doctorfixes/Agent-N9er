@@ -14,9 +14,13 @@ services:
       - EXECUTION_URL=http://agent-execution:8400
       - REPUTATION_URL=http://reputation-ledger:8500
       - RECURRING_URL=http://recurring-engine:8600
+      - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000
       - API_KEY=${API_KEY:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - orchestrator-data:/data
     depends_on:
       normalization-service:
         condition: service_healthy
@@ -169,7 +173,10 @@ services:
     ports:
       - "8600:8600"
     environment:
+      - RECURRING_DB_PATH=/data/recurring.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - recurring-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8600/health')"]
       interval: 30s
@@ -248,6 +255,10 @@ services:
       - REPUTATION_URL=http://reputation-ledger:8500
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - SIMULATION_URL=http://simulation-engine:9100
+      - JWT_SECRET=${JWT_SECRET:-verixio-dev-secret-change-in-production}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -263,6 +274,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  orchestrator-data:
   marketplace-data:
   execution-data:
   reputation-data:
+  recurring-data:
