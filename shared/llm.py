@@ -230,7 +230,7 @@ async def _openrouter_complete(
     resp = await client.post(
         f"{OPENROUTER_BASE_URL}/chat/completions",
         headers={
-            "Authorization": f"******'OPENROUTER_API_KEY')}",
+            "Authorization": "Bearer " + _get_env("OPENROUTER_API_KEY"),
             "Content-Type": "application/json",
             "HTTP-Referer": "https://agentn9er.com",
             "X-Title": "Agent N9er",
@@ -264,7 +264,7 @@ async def _openai_complete(
     resp = await client.post(
         f"{OPENAI_BASE_URL}/chat/completions",
         headers={
-            "Authorization": f"******'OPENAI_API_KEY')}",
+            "Authorization": "Bearer " + _get_env("OPENAI_API_KEY"),
             "Content-Type": "application/json",
         },
         json={
@@ -470,7 +470,7 @@ async def list_models() -> list[dict]:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     f"{OPENROUTER_BASE_URL}/models",
-                    headers={"Authorization": f"******'OPENROUTER_API_KEY')}"},
+                    headers={"Authorization": "Bearer " + _get_env("OPENROUTER_API_KEY")},
                 )
                 resp.raise_for_status()
                 return resp.json().get("data", [])
