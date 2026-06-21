@@ -14,9 +14,20 @@ services:
       - EXECUTION_URL=http://agent-execution:8400
       - REPUTATION_URL=http://reputation-ledger:8500
       - RECURRING_URL=http://recurring-engine:8600
+      - PROSPECTOR_URL=http://prospector:8900
+      - EVALUATOR_URL=http://evaluator:8800
+      - BILLING_URL=http://billing:9200
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - AUTO_SCAN_ENABLED=${AUTO_SCAN_ENABLED:-false}
+      - SCAN_INTERVAL_SECONDS=${SCAN_INTERVAL_SECONDS:-3600}
+      - SCAN_PLATFORMS=${SCAN_PLATFORMS:-upwork,github_bounties,freelancer,algora,topcoder}
+      - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000
       - API_KEY=${API_KEY:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - orchestrator-data:/data
     depends_on:
       normalization-service:
         condition: service_healthy
@@ -27,6 +38,12 @@ services:
       agent-execution:
         condition: service_healthy
       reputation-ledger:
+        condition: service_healthy
+      evaluator:
+        condition: service_healthy
+      prospector:
+        condition: service_healthy
+      billing:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
@@ -119,6 +136,7 @@ services:
     environment:
       - REPUTATION_URL=http://reputation-ledger:8500
       - DB_PATH=/data/execution.db
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
       - execution-data:/data
@@ -169,7 +187,10 @@ services:
     ports:
       - "8600:8600"
     environment:
+      - RECURRING_DB_PATH=/data/recurring.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - recurring-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8600/health')"]
       interval: 30s
@@ -239,6 +260,89 @@ services:
           memory: 256M
     restart: unless-stopped
 
+  evaluator:
+    build:
+      context: .
+      dockerfile: evaluator_service/Dockerfile
+    ports:
+      - "8800:8800"
+    environment:
+      - EVALUATOR_DB_PATH=/data/evaluator.db
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - evaluator-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8800/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
+  prospector:
+    build:
+      context: .
+      dockerfile: prospector_service/Dockerfile
+    ports:
+      - "8900:8900"
+    environment:
+      - PROSPECTOR_DB_PATH=/data/prospector.db
+      - EVALUATOR_URL=http://evaluator:8800
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - prospector-data:/data
+    depends_on:
+      evaluator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8900/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
+  billing:
+    build:
+      context: .
+      dockerfile: billing_service/Dockerfile
+    ports:
+      - "9200:9200"
+    environment:
+      - BILLING_DB_PATH=/data/billing.db
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - billing-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9200/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
   dashboard:
     build: ./dashboard
     ports:
@@ -247,14 +351,29 @@ services:
       - MARKETPLACE_URL=http://bidding-marketplace:8300
       - REPUTATION_URL=http://reputation-ledger:8500
       - ORCHESTRATOR_URL=http://orchestrator:9000
+      - NORMALIZATION_URL=http://normalization-service:8100
+      - RANKING_URL=http://ranking-engine:8200
+      - EXECUTION_URL=http://agent-execution:8400
+      - RECURRING_URL=http://recurring-engine:8600
       - SIMULATION_URL=http://simulation-engine:9100
+      - EVALUATOR_URL=http://evaluator:8800
+      - PROSPECTOR_URL=http://prospector:8900
+      - BILLING_URL=http://billing:9200
       - BROWSER_SERVICE_URL=http://browser-service:8001
+      - JWT_SECRET=${JWT_SECRET:-change-in-production}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     depends_on:
       orchestrator:
         condition: service_healthy
       bidding-marketplace:
         condition: service_healthy
       reputation-ledger:
+        condition: service_healthy
+      evaluator:
+        condition: service_healthy
+      prospector:
         condition: service_healthy
     deploy:
       resources:
@@ -264,6 +383,11 @@ services:
     restart: unless-stopped
 
 volumes:
+  orchestrator-data:
   marketplace-data:
   execution-data:
   reputation-data:
+  recurring-data:
+  evaluator-data:
+  prospector-data:
+  billing-data:

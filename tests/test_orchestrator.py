@@ -1,7 +1,13 @@
+import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiosqlite
 from httpx import ASGITransport, AsyncClient
 import pytest
+
+_tmpdir = tempfile.mkdtemp()
+os.environ["ORCHESTRATOR_DB_PATH"] = os.path.join(_tmpdir, "test_orchestrator.db")
 
 from conftest import load_service
 
@@ -9,16 +15,26 @@ orch = load_service("orch_main", "orchestrator")
 
 
 @pytest.fixture(autouse=True)
-def reset_agents():
-    orch.registered_agents.clear()
+async def reset_agents():
+    async with orch._agents_lock:
+        orch.registered_agents.clear()
+    try:
+        async with aiosqlite.connect(orch.DB_PATH) as db:
+            await db.execute("DELETE FROM agents")
+            await db.commit()
+    except Exception:
+        pass
     yield
-    orch.registered_agents.clear()
+    async with orch._agents_lock:
+        orch.registered_agents.clear()
 
 
 @pytest.fixture
-def client():
-    transport = ASGITransport(app=orch.app)
-    return AsyncClient(transport=transport, base_url="http://test")
+async def client():
+    async with orch.lifespan(orch.app):
+        transport = ASGITransport(app=orch.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
 
 
 def _make_response(data, status_code=200):
@@ -81,10 +97,11 @@ async def test_register_agent(client):
 
 
 async def test_full_pipeline(client):
-    orch.registered_agents["a1"] = {
-        "agent_id": "a1", "profile": "speed", "price": 0.1,
-        "eta_minutes": 2, "confidence": 0.8,
-    }
+    async with orch._agents_lock:
+        orch.registered_agents["a1"] = {
+            "agent_id": "a1", "profile": "speed", "specialization": "generalist",
+            "price": 0.1, "eta_minutes": 2, "confidence": 0.8,
+        }
 
     mock_client, _, _ = _mock_pipeline()
     with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
@@ -109,7 +126,8 @@ async def test_health_endpoint(client):
 
 
 async def test_list_agents(client):
-    orch.registered_agents["a1"] = {"agent_id": "a1", "profile": "speed"}
+    async with orch._agents_lock:
+        orch.registered_agents["a1"] = {"agent_id": "a1", "profile": "speed"}
     resp = await client.get("/agents")
     assert "a1" in resp.json()
 
@@ -128,3 +146,43 @@ async def test_register_agent_uses_defaults(client):
     data = orch.registered_agents["def1"]
     assert data["profile"] == "unknown"
     assert data["confidence"] == 0.5
+
+
+# --- Scan scheduler tests ---
+
+async def test_scan_status_endpoint(client):
+    resp = await client.get("/scan/status")
+    data = resp.json()
+    assert "auto_scan_enabled" in data
+    assert "platforms" in data
+    assert "total_scans" in data
+    assert data["running"] is False
+
+
+async def test_trigger_scan_calls_prospector(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 3, "new": 2, "platform": "upwork"})
+
+    async def mock_post(url, **kwargs):
+        return scan_resp
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/scan/trigger")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "results" in data
+    assert data["scan_state"]["total_scans"] >= 1
+
+
+async def test_trigger_scan_while_running(client):
+    orch._scan_state["running"] = True
+    try:
+        resp = await client.post("/scan/trigger")
+        assert resp.json()["ok"] == 0
+    finally:
+        orch._scan_state["running"] = False

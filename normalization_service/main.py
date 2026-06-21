@@ -10,11 +10,13 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.task_taxonomy import classify_task, list_categories
+from shared.config import CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("normalization")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 
 app = FastAPI(title="Agent N9er Normalization Service")
 
@@ -42,7 +44,7 @@ async def health():
 @app.post("/normalize")
 async def normalize(task: dict):
     task_id = str(uuid.uuid4())
-    objective = task.get("objective", "")
+    objective = str(task.get("objective", ""))
     inputs = task.get("inputs", {})
     source = task.get("source", "manual")
 

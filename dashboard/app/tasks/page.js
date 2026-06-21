@@ -1,44 +1,67 @@
 "use client";
 
+import { useState } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((res) => res.json());
+const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
 
 export default function TasksPage() {
-  const { data, error, isLoading } = useSWR("/api/tasks", fetcher, { refreshInterval: 5000 });
+  const [filter, setFilter] = useState("");
+  const { data: tasks } = useSWR("/api/tasks", fetcher, { refreshInterval: 5000 });
 
-  if (isLoading) return <p>Loading tasks...</p>;
-  if (error) return <p>Failed to load tasks</p>;
-
-  const tasks = data ?? [];
+  const taskList = Array.isArray(tasks) ? tasks : [];
+  const filtered = filter ? taskList.filter((t) => t.status === filter) : taskList;
+  const filters = ["", "open", "awarded", "completed", "failed"];
 
   return (
     <div>
-      <h1>Task Feed ({tasks.length})</h1>
-      {tasks.length === 0 ? (
-        <p>No tasks published yet. Submit one from the home page.</p>
-      ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse", background: "white" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: "var(--accent-cyan)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          Task History
+        </div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
+          {taskList.length} TOTAL // {taskList.filter((t) => t.status === "completed").length} COMPLETED // {taskList.filter((t) => t.status === "failed").length} FAILED
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+        {filters.map((f) => (
+          <button key={f || "all"} onClick={() => setFilter(f)} className={`cmd-btn sm ${filter === f ? "active" : ""}`}>
+            {f || "All"}
+          </button>
+        ))}
+      </div>
+
+      <div className="panel">
+        <table className="data-table">
           <thead>
-            <tr style={{ borderBottom: "2px solid #333", textAlign: "left" }}>
-              <th style={{ padding: "8px" }}>ID</th>
-              <th style={{ padding: "8px" }}>Objective</th>
-              <th style={{ padding: "8px" }}>Priority</th>
-              <th style={{ padding: "8px" }}>Status</th>
+            <tr>
+              <th>Task ID</th>
+              <th>Objective</th>
+              <th>Priority</th>
+              <th>Status</th>
+              <th>Agent</th>
             </tr>
           </thead>
           <tbody>
-            {tasks.map((t, i) => (
-              <tr key={t.id || i} style={{ borderBottom: "1px solid #ddd" }}>
-                <td style={{ padding: "8px", fontFamily: "monospace", fontSize: "12px" }}>{(t.id || "").slice(0, 8)}</td>
-                <td style={{ padding: "8px" }}>{t.objective}</td>
-                <td style={{ padding: "8px" }}>{t.priority_score ?? "-"}</td>
-                <td style={{ padding: "8px" }}>{t.status ?? "unknown"}</td>
+            {filtered.length > 0 ? filtered.map((t) => (
+              <tr key={t.id}>
+                <td style={{ color: "var(--accent-cyan)" }}>{t.id?.substring(0, 12)}</td>
+                <td style={{ maxWidth: 350, overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-primary)" }}>{t.objective}</td>
+                <td>{t.priority_score?.toFixed(2)}</td>
+                <td><span className={`badge ${t.status}`}>{t.status}</span></td>
+                <td style={{ color: "var(--text-muted)", fontSize: 10 }}>{t.awarded_to?.substring(0, 12) || "---"}</td>
               </tr>
-            ))}
+            )) : (
+              <tr>
+                <td colSpan={5} style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                  {taskList.length === 0 ? "No tasks in system." : "No tasks matching filter."}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
-      )}
+      </div>
     </div>
   );
 }

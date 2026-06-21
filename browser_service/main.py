@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import asyncio
 import logging
 import hashlib
 import hmac
@@ -17,6 +18,11 @@ from shared.security import (
     RequestIDMiddleware, RateLimitMiddleware, APIKeyMiddleware,
     get_service_headers,
 )
+from shared.config import (
+    DEFAULT_TIMEOUT, RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SECONDS, CORS_ORIGINS,
+)
+from shared.retry import retry_request
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("browser_service")
@@ -24,12 +30,11 @@ logger = logging.getLogger("browser_service")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
 app = FastAPI(title="Agent N9er Browser Service")
 
 app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
+app.add_middleware(RateLimitMiddleware, max_requests=RATE_LIMIT_MAX_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
 app.add_middleware(APIKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +55,10 @@ def _log_signal(source: str, event_type: str, objective: str) -> None:
         "objective": objective,
     })
 
+_watchers_lock = asyncio.Lock()
+
+VALID_WATCHERS = {"gmail", "drive", "slack", "notion", "airtable", "asana", "trello", "github"}
+
 
 class GenericWebhookRequest(BaseModel):
     objective: str = None
@@ -61,33 +70,35 @@ class GenericWebhookRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"ok": 1, "service": "browser", "active_watchers": list(active_watchers)}
+    async with _watchers_lock:
+        watchers = list(active_watchers)
+    return {"ok": 1, "service": "browser", "active_watchers": watchers}
 
 
 @app.get("/watchers")
 async def list_watchers():
+    async with _watchers_lock:
+        active = list(active_watchers)
     return {
-        "available": [
-            "gmail", "drive", "slack", "notion",
-            "airtable", "asana", "trello", "github",
-        ],
-        "active": list(active_watchers),
+        "available": sorted(VALID_WATCHERS),
+        "active": active,
     }
 
 
 @app.post("/watchers/{name}/activate")
 async def activate_watcher(name: str):
-    valid = {"gmail", "drive", "slack", "notion", "airtable", "asana", "trello", "github"}
-    if name not in valid:
+    if name not in VALID_WATCHERS:
         raise HTTPException(status_code=404, detail=f"Unknown watcher: {name}")
-    active_watchers.add(name)
+    async with _watchers_lock:
+        active_watchers.add(name)
     logger.info("Activated watcher: %s", name)
     return {"ok": 1, "watcher": name, "status": "active"}
 
 
 @app.post("/watchers/{name}/deactivate")
 async def deactivate_watcher(name: str):
-    active_watchers.discard(name)
+    async with _watchers_lock:
+        active_watchers.discard(name)
     logger.info("Deactivated watcher: %s", name)
     return {"ok": 1, "watcher": name, "status": "inactive"}
 
@@ -99,29 +110,36 @@ async def list_signals():
 
 async def _forward_to_pipeline(task: dict):
     svc = get_service_headers()
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{ORCHESTRATOR_URL}/pipeline", json=task, headers=svc)
-                resp.raise_for_status()
-                result = resp.json()
-                logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
-                return result
-        except httpx.RequestError as e:
-            if attempt == 2:
-                logger.error("Failed to forward to pipeline after 3 retries: %s", e)
-                raise HTTPException(status_code=503, detail="Orchestrator unreachable")
-            logger.warning("Retry %d forwarding to pipeline: %s", attempt + 1, e)
+    try:
+        resp = await retry_request(
+            "POST", f"{ORCHESTRATOR_URL}/pipeline",
+            timeout=DEFAULT_TIMEOUT, headers=svc, json=task,
+        )
+        result = resp.json()
+        logger.info("Forwarded task to pipeline: %s", result.get("task_id", "unknown"))
+        return result
+    except httpx.RequestError as e:
+        logger.error("Failed to forward to pipeline after retries: %s", e)
+        raise HTTPException(status_code=503, detail="Orchestrator unreachable")
 
 
 def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
     if not SLACK_SIGNING_SECRET:
-        return True
+        return False
     if abs(time.time() - int(timestamp)) > 300:
         return False
     sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
     expected = "v0=" + hmac.new(
         SLACK_SIGNING_SECRET.encode(), sig_basestring.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _verify_github_signature(body: bytes, signature: str) -> bool:
+    if not GITHUB_WEBHOOK_SECRET:
+        return False
+    expected = "sha256=" + hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
 
@@ -136,11 +154,8 @@ async def github_webhook(
 ):
     body = await request.body()
 
-    if GITHUB_WEBHOOK_SECRET and x_hub_signature_256:
-        expected = "sha256=" + hmac.new(
-            GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, x_hub_signature_256):
+    if GITHUB_WEBHOOK_SECRET:
+        if not x_hub_signature_256 or not _verify_github_signature(body, x_hub_signature_256):
             raise HTTPException(status_code=401, detail="Invalid signature")
 
     payload = await request.json()
@@ -217,7 +232,9 @@ async def slack_webhook(
 ):
     body = await request.body()
 
-    if SLACK_SIGNING_SECRET and x_slack_request_timestamp and x_slack_signature:
+    if SLACK_SIGNING_SECRET:
+        if not x_slack_request_timestamp or not x_slack_signature:
+            raise HTTPException(status_code=401, detail="Missing Slack signature headers")
         if not _verify_slack_signature(body, x_slack_request_timestamp, x_slack_signature):
             raise HTTPException(status_code=401, detail="Invalid Slack signature")
 

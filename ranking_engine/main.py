@@ -9,11 +9,13 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.task_taxonomy import compute_value_score
+from shared.config import CORS_ORIGINS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("ranking")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 
 app = FastAPI(title="Agent N9er Ranking Engine")
 
