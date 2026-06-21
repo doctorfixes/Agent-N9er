@@ -1,6 +1,8 @@
 import os
+import logging
 
 ENV = os.getenv("VERIXIO_ENV", "development")
+_config_logger = logging.getLogger("config")
 
 _PROFILES = {
     "development": {
@@ -73,3 +75,24 @@ RATE_LIMIT_WINDOW_SECONDS = _get("RATE_LIMIT_WINDOW_SECONDS", int)
 CORS_ORIGINS = _get("CORS_ORIGINS").split(",")
 LOG_LEVEL = _get("LOG_LEVEL")
 DB_BACKEND = _get("DB_BACKEND")
+
+
+def check_production_config():
+    if ENV != "production":
+        return []
+    warnings = []
+    if not os.getenv("API_KEY"):
+        warnings.append("API_KEY is not set — API endpoints are unauthenticated")
+    if not os.getenv("SERVICE_TOKEN"):
+        warnings.append("SERVICE_TOKEN is not set — inter-service calls are unauthenticated")
+    jwt = os.getenv("JWT_SECRET", "")
+    if not jwt or "change" in jwt.lower() or "dev" in jwt.lower():
+        warnings.append("JWT_SECRET uses an insecure default — dashboard auth is compromised")
+    admin_pass = os.getenv("ADMIN_PASS", "admin")
+    if admin_pass == "admin":
+        warnings.append("ADMIN_PASS is still the default 'admin'")
+    if not os.getenv("STRIPE_WEBHOOK_SECRET"):
+        warnings.append("STRIPE_WEBHOOK_SECRET is not set — webhook verification disabled")
+    for w in warnings:
+        _config_logger.critical("PRODUCTION CONFIG: %s", w)
+    return warnings

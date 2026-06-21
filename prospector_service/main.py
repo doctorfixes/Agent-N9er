@@ -23,9 +23,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, MaxBodySizeMiddleware
 from shared.config import CORS_ORIGINS
 from shared.logging_config import setup_logging
+from shared.circuit_breaker import CircuitBreaker, CircuitOpenError
 
 logger = setup_logging("prospector")
 
@@ -43,6 +44,25 @@ AUTO_EVALUATE = os.getenv("AUTO_EVALUATE", "false").lower() == "true"
 SCAN_COOLDOWN_SECONDS = int(os.getenv("SCAN_COOLDOWN_SECONDS", "60"))
 
 _last_scan_time: dict[str, float] = {}
+
+SCANNER_USER_AGENT = "AgentN9er/1.0 (Prospect Scanner; +https://agentn9er.com)"
+
+def _scanner_client(timeout: float = 15.0) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=timeout,
+        headers={"User-Agent": SCANNER_USER_AGENT},
+    )
+
+_platform_breakers: dict[str, CircuitBreaker] = {}
+
+def _get_breaker(platform: str) -> CircuitBreaker:
+    if platform not in _platform_breakers:
+        _platform_breakers[platform] = CircuitBreaker(
+            name=f"scanner:{platform}",
+            failure_threshold=5,
+            recovery_timeout=30.0,
+        )
+    return _platform_breakers[platform]
 
 UPWORK_RSS_BASE = "https://www.upwork.com/ab/feed/jobs/rss"
 UPWORK_SEARCH_CATEGORIES = os.getenv(
@@ -255,6 +275,7 @@ app = FastAPI(title="Agent N9er Prospector", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST", "PATCH"], allow_headers=["*"])
 
 
@@ -299,7 +320,11 @@ async def scan(req: ScanRequest):
         raise HTTPException(status_code=429, detail=f"Scan cooldown: retry in {remaining}s")
     _last_scan_time[req.platform] = now
 
-    prospects = await scan_fn(req.query, req.category, req.max_results)
+    breaker = _get_breaker(req.platform)
+    try:
+        prospects = await breaker.call(scan_fn, req.query, req.category, req.max_results)
+    except CircuitOpenError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     saved = 0
     new_prospects = []
@@ -351,7 +376,7 @@ async def _scan_upwork(query: str, category: str, max_results: int) -> list[dict
 
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(UPWORK_RSS_BASE, params=params)
             resp.raise_for_status()
             items = _parse_rss(resp.text)
@@ -388,7 +413,7 @@ async def _scan_github(query: str, category: str, max_results: int) -> list[dict
 
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 f"{GITHUB_API}/search/issues",
                 params={"q": search_query, "sort": "created", "order": "desc", "per_page": max_results},
@@ -420,7 +445,7 @@ async def _scan_github(query: str, category: str, max_results: int) -> list[dict
 async def _scan_superteam(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://earn.superteam.fun/api/listings",
                 params={"take": max_results, "type": "bounty"},
@@ -455,7 +480,7 @@ async def _scan_superteam(query: str, category: str, max_results: int) -> list[d
 async def _scan_gitcoin(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://gitcoin.co/api/v0.1/bounties/",
                 params={"is_open": "true", "order_by": "-web3_created", "limit": max_results,
@@ -490,7 +515,7 @@ async def _scan_dework(query: str, category: str, max_results: int) -> list[dict
                 id title description reward { amount currency } permalink tags { label }
             }}""" % max_results
         }
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.post("https://api.dework.xyz/graphql", json=gql_query)
             resp.raise_for_status()
             data = resp.json()
@@ -521,7 +546,7 @@ async def _scan_dework(query: str, category: str, max_results: int) -> list[dict
 async def _scan_layer3(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.layer3.xyz/v1/quests",
                 params={"limit": max_results, "status": "active",
@@ -555,7 +580,7 @@ async def _scan_layer3(query: str, category: str, max_results: int) -> list[dict
 async def _scan_replit(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://replit.com/api/v1/bounties",
                 params={"status": "open", "limit": max_results,
@@ -587,7 +612,7 @@ async def _scan_replit(query: str, category: str, max_results: int) -> list[dict
 async def _scan_zealy(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.zealy.io/public/communities",
                 params={"limit": max_results},
@@ -625,7 +650,7 @@ async def _scan_galxe(query: str, category: str, max_results: int) -> list[dict]
                 list { id name description numNFTMinted loyaltyPoints chain }
             }}""" % max_results
         }
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.post("https://graphigo.prd.galaxy.eco/query", json=gql)
             resp.raise_for_status()
             data = resp.json()
@@ -654,7 +679,7 @@ async def _scan_galxe(query: str, category: str, max_results: int) -> list[dict]
 async def _scan_questbook(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.questbook.app/api/grants",
                 params={"status": "open", "limit": max_results},
@@ -688,7 +713,7 @@ async def _scan_questbook(query: str, category: str, max_results: int) -> list[d
 async def _scan_onlydust(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.onlydust.com/api/v1/projects",
                 params={"pageSize": max_results},
@@ -721,7 +746,7 @@ async def _scan_onlydust(query: str, category: str, max_results: int) -> list[di
 async def _scan_freelancer(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             params = {"compact": "true", "limit": max_results, "sort_field": "time_updated",
                       "project_types[]": "fixed"}
             if query:
@@ -752,7 +777,7 @@ async def _scan_freelancer(query: str, category: str, max_results: int) -> list[
 async def _scan_fiverr(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             params = {"query": query or "python developer", "limit": max_results}
             resp = await client.get("https://www.fiverr.com/api/v1/buyer_requests", params=params)
             resp.raise_for_status()
@@ -779,7 +804,7 @@ async def _scan_fiverr(query: str, category: str, max_results: int) -> list[dict
 async def _scan_topcoder(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             params = {"status": "Active", "perPage": max_results, "sortBy": "startDate", "sortOrder": "desc"}
             if query:
                 params["name"] = query
@@ -813,7 +838,7 @@ async def _scan_topcoder(query: str, category: str, max_results: int) -> list[di
 async def _scan_hackerone(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.hackerone.com/v1/hackers/programs",
                 params={"page[size]": max_results},
@@ -847,7 +872,7 @@ async def _scan_hackerone(query: str, category: str, max_results: int) -> list[d
 async def _scan_bugcrowd(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://bugcrowd.com/programs.json",
                 params={"sort[]": "promoted-desc", "hidden[]": "false", "page": 1},
@@ -881,7 +906,7 @@ async def _scan_bugcrowd(query: str, category: str, max_results: int) -> list[di
 async def _scan_kaggle(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://www.kaggle.com/api/v1/competitions/list",
                 params={"sortBy": "latestDeadline", "page": 1, "group": "general",
@@ -917,7 +942,7 @@ async def _scan_kaggle(query: str, category: str, max_results: int) -> list[dict
 async def _scan_issuehunt(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.issuehunt.io/v1/issues",
                 params={"limit": max_results, "sort": "newest",
@@ -949,7 +974,7 @@ async def _scan_issuehunt(query: str, category: str, max_results: int) -> list[d
 async def _scan_algora(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _scanner_client() as client:
             resp = await client.get(
                 "https://api.algora.io/bounties",
                 params={"status": "open", "limit": max_results,

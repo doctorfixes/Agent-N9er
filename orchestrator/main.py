@@ -14,7 +14,7 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import (
     RequestIDMiddleware, RateLimitMiddleware, APIKeyMiddleware,
-    get_service_headers,
+    MaxBodySizeMiddleware, get_service_headers,
 )
 from shared.task_taxonomy import get_specialization_boost, list_categories
 from shared.config import (
@@ -231,6 +231,7 @@ app = FastAPI(title="Agent N9er Orchestrator", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RateLimitMiddleware, max_requests=RATE_LIMIT_MAX_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
 app.add_middleware(APIKeyMiddleware)
+app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,

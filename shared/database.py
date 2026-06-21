@@ -1,6 +1,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -172,6 +173,40 @@ def _sqlite_to_pg(stmt: str) -> str:
     if "IF NOT EXISTS" not in result.upper() and "CREATE INDEX" in result.upper():
         result = result.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)
     return result
+
+
+async def run_migrations(db_path: str, migrations: list[tuple[str, str]]):
+    """Apply pending schema migrations tracked in a _migrations table.
+
+    Each migration is a (name, sql) tuple. Already-applied migrations
+    (by name) are skipped. Safe to call on every startup.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS _migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
+        cursor = await db.execute("SELECT name FROM _migrations")
+        applied = {row[0] for row in await cursor.fetchall()}
+
+        for name, sql in migrations:
+            if name in applied:
+                continue
+            try:
+                await db.execute(sql)
+                await db.execute(
+                    "INSERT INTO _migrations (name, applied_at) VALUES (?, ?)",
+                    (name, datetime.now(timezone.utc).isoformat()),
+                )
+                await db.commit()
+                logger.info("Migration applied: %s", name)
+            except Exception as e:
+                logger.error("Migration %s failed: %s", name, e)
+                raise
 
 
 def create_database(db_path: str = None, dsn: str = None) -> SQLiteDB | PostgresDB:

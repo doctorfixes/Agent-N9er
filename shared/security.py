@@ -81,6 +81,19 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, max_bytes: int = 1_048_576):  # 1MB default
+        super().__init__(app)
+        self.max_bytes = max_bytes
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            content_length = request.headers.get("content-length")
+            if content_length and int(content_length) > self.max_bytes:
+                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        return await call_next(request)
+
+
 class ServiceTokenMiddleware(BaseHTTPMiddleware):
     """Validates X-Service-Token header on internal services."""
 

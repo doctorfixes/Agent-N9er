@@ -11,7 +11,11 @@ from dataclasses import dataclass
 
 import httpx
 
+from shared.circuit_breaker import CircuitBreaker, CircuitOpenError
+
 logger = logging.getLogger("openrouter")
+
+_llm_breaker = CircuitBreaker(name="openrouter", failure_threshold=5, recovery_timeout=30.0)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -145,16 +149,26 @@ async def complete(
         "temperature": temperature,
     }
 
+    if _llm_breaker.state == "open":
+        raise CircuitOpenError(
+            f"Circuit '{_llm_breaker.name}' is open after {_llm_breaker._failure_count} failures"
+        )
+
     from shared.config import OPENROUTER_TIMEOUT
     start = time.monotonic()
-    async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT) as client:
-        resp = await client.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT) as client:
+            resp = await client.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        await _llm_breaker._on_success()
+    except Exception:
+        await _llm_breaker._on_failure()
+        raise
 
     elapsed_ms = (time.monotonic() - start) * 1000
 

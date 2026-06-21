@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, MaxBodySizeMiddleware
 from shared.config import CORS_ORIGINS
 from shared.logging_config import setup_logging
 
@@ -111,6 +111,7 @@ app = FastAPI(title="Agent N9er Billing", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST", "PATCH"], allow_headers=["*"])
 
 

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_service_headers
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, MaxBodySizeMiddleware, get_service_headers
 from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
 from shared.retry import retry_request
 from shared.llm import complete, estimate_cost, select_tier, OPENROUTER_API_KEY
@@ -92,6 +92,7 @@ app = FastAPI(title="Agent N9er Execution Engine", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,

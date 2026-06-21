@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
+from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, MaxBodySizeMiddleware
+from shared.database import run_migrations
 from shared.config import CORS_ORIGINS
 from shared.logging_config import setup_logging
 
@@ -62,8 +63,7 @@ async def init_db():
                 inputs TEXT DEFAULT '{}',
                 source TEXT DEFAULT 'manual',
                 published_at TEXT,
-                awarded_to TEXT,
-                deadline TEXT
+                awarded_to TEXT
             )
         """)
         await db.execute("""
@@ -106,9 +106,15 @@ async def _audit(db, action: str, entity_type: str, entity_id: str = None, detai
     )
 
 
+MIGRATIONS = [
+    ("001_add_deadline", "ALTER TABLE tasks ADD COLUMN deadline TEXT"),
+]
+
+
 @asynccontextmanager
 async def lifespan(app):
     await init_db()
+    await run_migrations(DB_PATH, MIGRATIONS)
     yield
 
 
@@ -116,6 +122,7 @@ app = FastAPI(title="Agent N9er Bidding Marketplace", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
+app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
