@@ -1248,17 +1248,6 @@ async def _get_prospect(prospect_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-async def _get_by_platform_id(platform: str, platform_job_id: str) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM prospects WHERE platform = ? AND platform_job_id = ?",
-            (platform, platform_job_id),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-
 async def _save_prospect(p: dict):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
