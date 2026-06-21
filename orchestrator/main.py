@@ -29,7 +29,7 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 MAX_RETRIES = 3
 RETRY_BACKOFF = 0.3
 
-app = FastAPI(title="Verixio Orchestrator")
+app = FastAPI(title="Agent N9er Orchestrator")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)

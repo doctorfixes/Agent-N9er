@@ -14,7 +14,7 @@ from task_generator import gen, TASK_TEMPLATES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("simulation")
 
-app = FastAPI(title="Verixio Simulation Engine")
+app = FastAPI(title="Agent N9er Simulation Engine")
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 MARKETPLACE_URL = os.getenv("MARKETPLACE_URL", "http://localhost:8300")

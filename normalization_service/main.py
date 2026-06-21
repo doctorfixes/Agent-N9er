@@ -16,7 +16,7 @@ logger = logging.getLogger("normalization")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
-app = FastAPI(title="Verixio Normalization Service")
+app = FastAPI(title="Agent N9er Normalization Service")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)
