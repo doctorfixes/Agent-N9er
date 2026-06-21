@@ -38,6 +38,7 @@ PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 MEMORY_URL = os.getenv("MEMORY_URL", "http://localhost:9300")
+DELIVERY_URL = os.getenv("DELIVERY_URL", "http://localhost:9400")
 
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
@@ -653,7 +654,30 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 )
                                 if inv_resp.status_code == 200:
                                     results["invoiced"] += 1
-                                    prospect_result["invoice_id"] = inv_resp.json().get("invoice_id")
+                                    invoice_id = inv_resp.json().get("invoice_id")
+                                    prospect_result["invoice_id"] = invoice_id
+
+                                    # 5. Deliver work product to client
+                                    client_email = req.client_email or prospect.get("client_email", "")
+                                    try:
+                                        del_resp = await client.post(
+                                            f"{DELIVERY_URL}/deliver",
+                                            json={
+                                                "task_id": pid,
+                                                "client_email": client_email,
+                                                "subject": f"Deliverable: {prospect['title']}",
+                                                "format": "markdown",
+                                                "include_invoice": True,
+                                                "invoice_id": invoice_id or "",
+                                            },
+                                            headers=svc,
+                                        )
+                                        if del_resp.status_code == 200:
+                                            del_data = del_resp.json()
+                                            prospect_result["delivery_id"] = del_data.get("delivery_id")
+                                            prospect_result["delivery_status"] = del_data.get("status")
+                                    except httpx.RequestError:
+                                        logger.warning("Delivery failed for task %s", pid)
                         else:
                             prospect_result["status"] = "execution_failed"
                     else:

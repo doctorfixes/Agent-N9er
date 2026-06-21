@@ -17,6 +17,8 @@ services:
       - PROSPECTOR_URL=http://prospector:8900
       - EVALUATOR_URL=http://evaluator:8800
       - BILLING_URL=http://billing:9200
+      - MEMORY_URL=http://memory:9300
+      - DELIVERY_URL=http://delivery:9400
       - SENTRY_DSN=${SENTRY_DSN:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - AUTO_SCAN_ENABLED=${AUTO_SCAN_ENABLED:-false}
@@ -362,6 +364,69 @@ services:
           memory: 256M
     restart: unless-stopped
 
+  memory:
+    build:
+      context: .
+      dockerfile: memory_service/Dockerfile
+    ports:
+      - "9300:9300"
+    environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - MEMORY_DB_PATH=/data/memory.db
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    volumes:
+      - memory-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9300/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
+  delivery:
+    build:
+      context: .
+      dockerfile: delivery_service/Dockerfile
+    ports:
+      - "9400:9400"
+    environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - DELIVERY_DB_PATH=/data/delivery.db
+      - EXECUTION_URL=http://agent-execution:8400
+      - BILLING_URL=http://billing:9200
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - DELIVERY_FROM_EMAIL=${DELIVERY_FROM_EMAIL:-}
+      - DELIVERY_FROM_NAME=${DELIVERY_FROM_NAME:-Agent N9er}
+    volumes:
+      - delivery-data:/data
+    depends_on:
+      agent-execution:
+        condition: service_healthy
+      billing:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9400/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 128M
+    restart: unless-stopped
+
   dashboard:
     build: ./dashboard
     ports:
@@ -378,6 +443,8 @@ services:
       - EVALUATOR_URL=http://evaluator:8800
       - PROSPECTOR_URL=http://prospector:8900
       - BILLING_URL=http://billing:9200
+      - MEMORY_URL=http://memory:9300
+      - DELIVERY_URL=http://delivery:9400
       - BROWSER_SERVICE_URL=http://browser-service:8001
       - JWT_SECRET=${JWT_SECRET:-change-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
@@ -410,3 +477,5 @@ volumes:
   evaluator-data:
   prospector-data:
   billing-data:
+  memory-data:
+  delivery-data:
