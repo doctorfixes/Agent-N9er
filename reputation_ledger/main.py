@@ -28,6 +28,14 @@ class UpdateRequest(BaseModel):
     success: bool
 
 
+class RatingRequest(BaseModel):
+    agent_id: str
+    prospect_id: str = ""
+    rating: int
+    client_email: str = ""
+    comment: str = ""
+
+
 @asynccontextmanager
 async def _get_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -44,10 +52,26 @@ async def init_db():
                 profile TEXT DEFAULT '',
                 success INTEGER DEFAULT 0,
                 fail INTEGER DEFAULT 0,
-                score REAL DEFAULT 0.5
+                score REAL DEFAULT 0.5,
+                total_ratings INTEGER DEFAULT 0,
+                avg_rating REAL DEFAULT 0.0,
+                jobs_completed INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ratings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT,
+                prospect_id TEXT,
+                rating INTEGER,
+                client_email TEXT DEFAULT '',
+                comment TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agents_score ON agents(score)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ratings_agent ON ratings(agent_id)")
         await db.commit()
     logger.info("Reputation database initialized at %s", DB_PATH)
 
@@ -125,20 +149,87 @@ async def update(record: UpdateRequest):
     return {"ok": 1, "agent_id": record.agent_id, "reputation": entry}
 
 
+@app.post("/rate")
+async def rate_agent(req: RatingRequest):
+    if req.rating < 1 or req.rating > 5:
+        raise HTTPException(status_code=422, detail="Rating must be 1-5")
+
+    async with _get_db() as db:
+        cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (req.agent_id,))
+        row = await cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        await db.execute(
+            "INSERT INTO ratings (agent_id, prospect_id, rating, client_email, comment) VALUES (?, ?, ?, ?, ?)",
+            (req.agent_id, req.prospect_id, req.rating, req.client_email, req.comment),
+        )
+
+        total_ratings = row["total_ratings"] + 1
+        avg_rating = round(((row["avg_rating"] * row["total_ratings"]) + req.rating) / total_ratings, 2)
+        jobs_completed = row["jobs_completed"] + 1
+
+        score_delta = (req.rating - 3) * 0.01
+        new_score = max(0.0, min(1.0, row["score"] + score_delta))
+
+        await db.execute(
+            "UPDATE agents SET total_ratings = ?, avg_rating = ?, jobs_completed = ?, score = ? WHERE agent_id = ?",
+            (total_ratings, avg_rating, jobs_completed, round(new_score, 4), req.agent_id),
+        )
+        await db.commit()
+
+    logger.info("Agent %s rated %d/5 (avg %.2f over %d)", req.agent_id, req.rating, avg_rating, total_ratings)
+    return {
+        "ok": 1,
+        "agent_id": req.agent_id,
+        "rating": req.rating,
+        "avg_rating": avg_rating,
+        "total_ratings": total_ratings,
+        "score": round(new_score, 4),
+    }
+
+
+@app.get("/agent/{agent_id}/ratings")
+async def get_agent_ratings(agent_id: str, limit: int = 50):
+    async with _get_db() as db:
+        cursor = await db.execute("SELECT agent_id FROM agents WHERE agent_id = ?", (agent_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        cursor = await db.execute(
+            "SELECT * FROM ratings WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            (agent_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+def _agent_to_dict(row):
+    d = {
+        "agent_id": row["agent_id"],
+        "profile": row["profile"],
+        "success": row["success"],
+        "fail": row["fail"],
+        "score": row["score"],
+    }
+    try:
+        d["total_ratings"] = row["total_ratings"]
+        d["avg_rating"] = row["avg_rating"]
+        d["jobs_completed"] = row["jobs_completed"]
+    except (IndexError, KeyError):
+        d["total_ratings"] = 0
+        d["avg_rating"] = 0.0
+        d["jobs_completed"] = 0
+    return d
+
+
 @app.get("/ledger")
 async def get_ledger():
     async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM agents ORDER BY score DESC")
         rows = await cursor.fetchall()
-        return {
-            row["agent_id"]: {
-                "profile": row["profile"],
-                "success": row["success"],
-                "fail": row["fail"],
-                "score": row["score"],
-            }
-            for row in rows
-        }
+        return {row["agent_id"]: _agent_to_dict(row) for row in rows}
 
 
 @app.get("/agent/{agent_id}")
@@ -149,10 +240,4 @@ async def get_agent(agent_id: str):
 
     if not row:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return {
-        "agent_id": row["agent_id"],
-        "profile": row["profile"],
-        "success": row["success"],
-        "fail": row["fail"],
-        "score": row["score"],
-    }
+    return _agent_to_dict(row)

@@ -88,3 +88,69 @@ async def test_register_missing_agent_id_returns_422(client):
 async def test_update_missing_success_returns_422(client):
     resp = await client.post("/update", json={"agent_id": "x1"})
     assert resp.status_code == 422
+
+
+# --- Client rating tests ---
+
+async def test_rate_agent_5_stars(client):
+    await client.post("/register", json={"agent_id": "rated1", "profile": "test"})
+    resp = await client.post("/rate", json={"agent_id": "rated1", "rating": 5, "prospect_id": "p1"})
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["rating"] == 5
+    assert data["avg_rating"] == 5.0
+    assert data["total_ratings"] == 1
+
+
+async def test_rate_agent_avg_calculation(client):
+    await client.post("/register", json={"agent_id": "rated2", "profile": "test"})
+    await client.post("/rate", json={"agent_id": "rated2", "rating": 5})
+    await client.post("/rate", json={"agent_id": "rated2", "rating": 3})
+    resp = await client.post("/rate", json={"agent_id": "rated2", "rating": 1})
+    data = resp.json()
+    assert data["total_ratings"] == 3
+    assert data["avg_rating"] == 3.0
+
+
+async def test_rate_invalid_rating_rejected(client):
+    await client.post("/register", json={"agent_id": "rated3", "profile": "test"})
+    resp = await client.post("/rate", json={"agent_id": "rated3", "rating": 6})
+    assert resp.status_code == 422
+    resp = await client.post("/rate", json={"agent_id": "rated3", "rating": 0})
+    assert resp.status_code == 422
+
+
+async def test_rate_nonexistent_agent_404(client):
+    resp = await client.post("/rate", json={"agent_id": "ghost", "rating": 5})
+    assert resp.status_code == 404
+
+
+async def test_rate_adjusts_score_up(client):
+    await client.post("/register", json={"agent_id": "rated4", "profile": "test"})
+    resp = await client.post("/rate", json={"agent_id": "rated4", "rating": 5})
+    assert resp.json()["score"] > 0.5
+
+
+async def test_rate_adjusts_score_down(client):
+    await client.post("/register", json={"agent_id": "rated5", "profile": "test"})
+    resp = await client.post("/rate", json={"agent_id": "rated5", "rating": 1})
+    assert resp.json()["score"] < 0.5
+
+
+async def test_get_agent_ratings(client):
+    await client.post("/register", json={"agent_id": "rated6", "profile": "test"})
+    await client.post("/rate", json={"agent_id": "rated6", "rating": 4, "comment": "Good work"})
+    resp = await client.get("/agent/rated6/ratings")
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["rating"] == 4
+    assert data[0]["comment"] == "Good work"
+
+
+async def test_agent_includes_rating_fields(client):
+    await client.post("/register", json={"agent_id": "rated7", "profile": "test"})
+    await client.post("/rate", json={"agent_id": "rated7", "rating": 4})
+    agent = (await client.get("/agent/rated7")).json()
+    assert agent["total_ratings"] == 1
+    assert agent["avg_rating"] == 4.0
+    assert agent["jobs_completed"] == 1
