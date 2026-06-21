@@ -254,8 +254,12 @@ services:
       - MARKETPLACE_URL=http://bidding-marketplace:8300
       - REPUTATION_URL=http://reputation-ledger:8500
       - ORCHESTRATOR_URL=http://orchestrator:9000
+      - NORMALIZATION_URL=http://normalization-service:8100
+      - RANKING_URL=http://ranking-engine:8200
+      - EXECUTION_URL=http://agent-execution:8400
+      - RECURRING_URL=http://recurring-engine:8600
       - SIMULATION_URL=http://simulation-engine:9100
-      - JWT_SECRET=${JWT_SECRET:-verixio-dev-secret-change-in-production}
+      - JWT_SECRET=${JWT_SECRET:-change-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS:-admin}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
