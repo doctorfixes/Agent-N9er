@@ -14,6 +14,8 @@ export default function RootLayout({ children }) {
             <strong style={{ fontSize: "1.2em", color: "#f9fafb", letterSpacing: "0.02em" }}>Agent N9er</strong>
             <div style={{ display: "flex", gap: "4px" }}>
               <a href="/" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#d1d5db", textDecoration: "none" }}>Mission Control</a>
+              <a href="/prospects" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Prospects</a>
+              <a href="/revenue" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Revenue</a>
               <a href="/tasks" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Task History</a>
               <a href="/leaderboard" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Leaderboard</a>
             </div>

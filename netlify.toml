@@ -15,6 +15,9 @@
 # EXECUTION_URL = https://execution-production.up.railway.app
 # REPUTATION_URL = https://reputation-production.up.railway.app
 # RECURRING_URL = https://recurring-production.up.railway.app
+# EVALUATOR_URL = https://evaluator-production.up.railway.app
+# PROSPECTOR_URL = https://prospector-production.up.railway.app
+# BILLING_URL = https://billing-production.up.railway.app
 # JWT_SECRET = <generate a random 256-bit secret>
 # ADMIN_USER = admin
 # ADMIN_PASS = <strong password>

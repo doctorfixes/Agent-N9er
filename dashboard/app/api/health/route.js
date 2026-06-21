@@ -8,6 +8,9 @@ const SERVICES = {
   execution: process.env.EXECUTION_URL || "http://localhost:8400",
   reputation: process.env.REPUTATION_URL || "http://localhost:8500",
   recurring: process.env.RECURRING_URL || "http://localhost:8600",
+  evaluator: process.env.EVALUATOR_URL || "http://localhost:8800",
+  prospector: process.env.PROSPECTOR_URL || "http://localhost:8900",
+  billing: process.env.BILLING_URL || "http://localhost:9200",
 };
 
 function svcHeaders() {
