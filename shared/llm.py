@@ -140,8 +140,9 @@ async def complete(
         "temperature": temperature,
     }
 
+    from shared.config import OPENROUTER_TIMEOUT
     start = time.monotonic()
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT) as client:
         resp = await client.post(
             f"{OPENROUTER_BASE_URL}/chat/completions",
             headers=headers,
@@ -156,8 +157,15 @@ async def complete(
     input_tokens = usage.get("prompt_tokens", 0)
     output_tokens = usage.get("completion_tokens", 0)
 
-    input_cost = (input_tokens / 1_000_000) * model_info.get("input_cost_per_m", 3.0)
-    output_cost = (output_tokens / 1_000_000) * model_info.get("output_cost_per_m", 15.0)
+    actual_model_info = model_info
+    if model_override:
+        for tier_info in MODEL_TIERS.values():
+            if tier_info["model"] == model_override:
+                actual_model_info = tier_info
+                break
+
+    input_cost = (input_tokens / 1_000_000) * actual_model_info.get("input_cost_per_m", 3.0)
+    output_cost = (output_tokens / 1_000_000) * actual_model_info.get("output_cost_per_m", 15.0)
     total_cost = input_cost + output_cost
 
     choice = data.get("choices", [{}])[0]

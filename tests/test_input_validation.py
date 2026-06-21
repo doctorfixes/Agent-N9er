@@ -294,17 +294,17 @@ class TestSpecialCharacters:
 class TestWrongTypes:
     async def test_normalize_number_as_objective(self, norm_client):
         resp = await norm_client.post("/normalize", json={"objective": 12345})
-        assert resp.status_code == 200
+        assert resp.status_code == 422
 
     async def test_normalize_boolean_as_objective(self, norm_client):
         resp = await norm_client.post("/normalize", json={"objective": True})
-        assert resp.status_code == 200
+        assert resp.status_code == 422
 
     async def test_normalize_list_as_inputs(self, norm_client):
         resp = await norm_client.post("/normalize", json={
             "objective": "test", "inputs": [1, 2, 3]
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 422
 
     async def test_ranking_missing_objective(self, ranking_client):
         resp = await ranking_client.post("/rank", json={"id": "mo1"})

@@ -163,8 +163,13 @@ async def update(record: UpdateRequest):
             score = max(0.0, score - 0.02)
 
         await db.execute(
-            "INSERT OR REPLACE INTO agents (agent_id, profile, nickname, success, fail, score) VALUES (?, ?, ?, ?, ?, ?)",
-            (record.agent_id, row["profile"] if row else "", row["nickname"] if row else "", success, fail, round(score, 4))
+            """INSERT INTO agents (agent_id, success, fail, score)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(agent_id) DO UPDATE SET
+                   success = excluded.success,
+                   fail = excluded.fail,
+                   score = excluded.score""",
+            (record.agent_id, success, fail, round(score, 4))
         )
         await db.commit()
 

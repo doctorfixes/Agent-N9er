@@ -44,18 +44,6 @@ SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
 SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
 
-app = FastAPI(title="Agent N9er Orchestrator")
-
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)
-app.add_middleware(APIKeyMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
 registered_agents = {}
 _agents_lock = asyncio.Lock()
 _scan_task: asyncio.Task | None = None
@@ -209,14 +197,43 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health():
+async def health(deep: bool = False):
     async with _agents_lock:
         count = len(registered_agents)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT COUNT(*) FROM agents")
             db_count = (await cursor.fetchone())[0]
-        return {"ok": 1, "service": "orchestrator", "registered_agents": count, "db_agents": db_count}
+        result = {"ok": 1, "service": "orchestrator", "registered_agents": count, "db_agents": db_count}
+
+        if deep:
+            downstream = {
+                "prospector": PROSPECTOR_URL,
+                "evaluator": EVALUATOR_URL,
+                "billing": BILLING_URL,
+                "execution": EXECUTION_URL,
+            }
+            downstream_status = {}
+            async with httpx.AsyncClient(timeout=QUICK_TIMEOUT) as client:
+                for name, url in downstream.items():
+                    try:
+                        resp = await client.head(f"{url}/health")
+                        downstream_status[name] = {
+                            "reachable": True,
+                            "status_code": resp.status_code,
+                        }
+                    except httpx.RequestError as e:
+                        downstream_status[name] = {
+                            "reachable": False,
+                            "error": str(e),
+                        }
+            result["downstream"] = downstream_status
+            all_reachable = all(s["reachable"] for s in downstream_status.values())
+            if not all_reachable:
+                result["ok"] = 0
+                result["warning"] = "one or more downstream services unreachable"
+
+        return result
     except Exception:
         return {"ok": 0, "service": "orchestrator", "error": "db_unreachable"}
 
@@ -271,11 +288,11 @@ async def trigger_scan():
 
 
 @app.post("/pipeline")
-async def pipeline(task: dict):
+async def pipeline(task: PipelineRequest):
     try:
         svc = _svc_headers()
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            norm_resp = await retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task, headers=svc)
+            norm_resp = await retry_post(client, f"{NORMALIZATION_URL}/normalize", json=task.model_dump(), headers=svc)
             normalized = norm_resp.json()
 
             rank_resp = await retry_post(client, f"{RANKING_URL}/rank", json=normalized, headers=svc)
@@ -308,7 +325,7 @@ async def pipeline(task: dict):
 
 
 @app.post("/pipeline/full")
-async def full_pipeline(task: dict):
+async def full_pipeline(task: PipelineRequest):
     pub_result = await pipeline(task)
     task_id = pub_result["task_id"]
     category = pub_result.get("normalized", {}).get("category", "uncategorized")
@@ -393,7 +410,12 @@ async def process_recurring():
         results = []
         for task in generated_tasks:
             try:
-                result = await full_pipeline(task)
+                pipeline_req = PipelineRequest(
+                    objective=task.get("objective", ""),
+                    source=task.get("source", "recurring"),
+                    inputs=task.get("inputs", {}),
+                )
+                result = await full_pipeline(pipeline_req)
                 results.append(result)
             except HTTPException as e:
                 results.append({"task_id": task.get("id"), "error": e.detail})

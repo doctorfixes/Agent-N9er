@@ -81,7 +81,7 @@ class TestRetryPost:
             await retry_post(MockClient(), "http://test/api", max_retries=3, backoff=0.01)
         assert call_count == 3
 
-    async def test_does_not_retry_http_status_errors(self):
+    async def test_retries_5xx_http_status_errors(self):
         call_count = 0
 
         class MockClient:
@@ -89,6 +89,19 @@ class TestRetryPost:
                 nonlocal call_count
                 call_count += 1
                 return FakeResponse(500)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await retry_post(MockClient(), "http://test/api", max_retries=3, backoff=0.01)
+        assert call_count == 3
+
+    async def test_does_not_retry_4xx_http_status_errors(self):
+        call_count = 0
+
+        class MockClient:
+            async def post(self, url, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return FakeResponse(400)
 
         with pytest.raises(httpx.HTTPStatusError):
             await retry_post(MockClient(), "http://test/api", max_retries=3, backoff=0.01)

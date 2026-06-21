@@ -23,6 +23,15 @@ async def retry_post(
             resp = await client.post(url, **kwargs)
             resp.raise_for_status()
             return resp
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if e.response.status_code >= 500 and attempt < retries - 1:
+                wait = backoff_base * (2 ** attempt)
+                logger.warning("Retry %d/%d for %s (HTTP %d): %s",
+                               attempt + 1, retries, url, e.response.status_code, e)
+                await asyncio.sleep(wait)
+            elif e.response.status_code < 500:
+                raise
         except httpx.RequestError as e:
             last_exc = e
             if attempt < retries - 1:
@@ -50,6 +59,15 @@ async def retry_request(
                 resp = await client.request(method, url, headers=headers, **kwargs)
                 resp.raise_for_status()
                 return resp
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if e.response.status_code >= 500 and attempt < retries - 1:
+                wait = backoff_base * (2 ** attempt)
+                logger.warning("Retry %d/%d for %s %s (HTTP %d): %s",
+                               attempt + 1, retries, method, url, e.response.status_code, e)
+                await asyncio.sleep(wait)
+            elif e.response.status_code < 500:
+                raise
         except httpx.RequestError as e:
             last_exc = e
             if attempt < retries - 1:

@@ -41,9 +41,12 @@ async def test_normalize_defaults_missing_inputs(client):
 
 
 async def test_normalize_preserves_raw(client):
-    payload = {"objective": "x", "extra": "data"}
+    payload = {"objective": "x"}
     resp = await client.post("/normalize", json=payload)
-    assert resp.json()["raw"] == payload
+    raw = resp.json()["raw"]
+    assert raw["objective"] == "x"
+    assert "inputs" in raw
+    assert "source" in raw
 
 
 async def test_normalize_includes_source(client):

@@ -125,6 +125,13 @@ async def test_health_endpoint(client):
     assert resp.json()["ok"] == 1
 
 
+async def test_health_shallow_has_no_downstream(client):
+    resp = await client.get("/health")
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "downstream" not in data
+
+
 async def test_list_agents(client):
     async with orch._agents_lock:
         orch.registered_agents["a1"] = {"agent_id": "a1", "profile": "speed"}

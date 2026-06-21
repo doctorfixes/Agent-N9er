@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import re
@@ -5,9 +6,12 @@ import json
 import uuid
 import logging
 import smtplib
-import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as SafeET
+except ImportError:
+    import xml.etree.ElementTree as SafeET
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -293,7 +297,7 @@ async def scan(req: ScanRequest):
 
     high_value = [p for p in new_prospects if p.get("budget_max", 0) >= NOTIFY_MIN_BUDGET]
     if high_value:
-        _send_prospect_alert(high_value)
+        await _send_prospect_alert(high_value)
 
     if AUTO_EVALUATE and new_prospects:
         evaluated = await _auto_evaluate_batch(new_prospects)
@@ -964,7 +968,7 @@ async def _scan_algora(query: str, category: str, max_results: int) -> list[dict
 # Notifications
 # ---------------------------------------------------------------------------
 
-def _send_prospect_alert(prospects: list[dict]):
+async def _send_prospect_alert(prospects: list[dict]):
     if not SMTP_HOST or not NOTIFY_EMAIL:
         logger.info("Skipping email alert: SMTP not configured (%d high-value prospects)", len(prospects))
         return
@@ -991,12 +995,16 @@ def _send_prospect_alert(prospects: list[dict]):
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
-    try:
+    def _do_send():
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             server.starttls()
             if SMTP_USER and SMTP_PASS:
                 server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_send)
         logger.info("Sent prospect alert to %s (%d prospects)", NOTIFY_EMAIL, len(prospects))
     except Exception as e:
         logger.warning("Failed to send prospect alert: %s", e)
@@ -1057,14 +1065,14 @@ async def _save_prospect_dedup(p: dict) -> bool:
 def _parse_rss(xml_text: str) -> list[dict]:
     items = []
     try:
-        root = ET.fromstring(xml_text)
+        root = SafeET.fromstring(xml_text)
         for item in root.iter("item"):
             entry = {}
             for child in item:
                 tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                 entry[tag] = child.text or ""
             items.append(entry)
-    except ET.ParseError:
+    except SafeET.ParseError:
         logger.warning("Failed to parse RSS feed")
     return items
 
@@ -1183,7 +1191,7 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
         if timestamp_field:
             await db.execute(
                 f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
-                (update.status, datetime.utcnow().isoformat(), prospect_id),
+                (update.status, datetime.now(timezone.utc).isoformat(), prospect_id),
             )
         else:
             await db.execute(

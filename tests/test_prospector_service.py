@@ -230,16 +230,16 @@ class TestDeduplication:
 
 
 class TestNotifications:
-    def test_send_alert_skips_without_smtp(self):
+    async def test_send_alert_skips_without_smtp(self):
         original = prospector.SMTP_HOST
         prospector.SMTP_HOST = ""
         try:
-            prospector._send_prospect_alert([{"platform": "upwork", "title": "Test", "budget_max": 500}])
+            await prospector._send_prospect_alert([{"platform": "upwork", "title": "Test", "budget_max": 500}])
         finally:
             prospector.SMTP_HOST = original
 
     @patch("smtplib.SMTP")
-    def test_send_alert_with_smtp(self, mock_smtp_class):
+    async def test_send_alert_with_smtp(self, mock_smtp_class):
         mock_server = MagicMock()
         mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
         mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
@@ -249,7 +249,7 @@ class TestNotifications:
         prospector.SMTP_HOST = "smtp.test.com"
         prospector.NOTIFY_EMAIL = "test@test.com"
         try:
-            prospector._send_prospect_alert([
+            await prospector._send_prospect_alert([
                 {"platform": "upwork", "title": "High Value Job", "budget_max": 1000, "url": "https://example.com"},
             ])
             mock_smtp_class.assert_called_once()

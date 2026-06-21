@@ -30,6 +30,9 @@ export default function RootLayout({ children }) {
             <a href="/tasks">Tasks</a>
             <a href="/analytics">Analytics</a>
             <a href="/leaderboard">Agents</a>
+            <a href="/agent-marketplace">Marketplace</a>
+            <a href="/signal-intelligence">Signals</a>
+            <a href="/integrations">Integrations</a>
           </div>
           <LogoutButton />
         </nav>

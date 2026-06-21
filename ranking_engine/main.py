@@ -14,8 +14,6 @@ from shared.logging_config import setup_logging
 
 logger = setup_logging("ranking")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-
 
 app = FastAPI(title="Agent N9er Ranking Engine")
 

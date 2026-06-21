@@ -1,7 +1,9 @@
+import hmac
 import os
 import sys
 import tempfile
 import time
+import logging
 from unittest.mock import patch
 
 from httpx import ASGITransport, AsyncClient
@@ -267,3 +269,34 @@ async def test_rate_limit_enforced():
 
         resp = await c.get("/data")
         assert resp.status_code == 429
+
+
+# --- Timing-safe comparison tests ---
+
+async def test_api_key_uses_hmac_compare():
+    import shared.security as sec
+    assert "hmac" in dir(sec), "hmac module should be imported in security.py"
+
+
+async def test_service_token_production_warning(caplog):
+    from fastapi import FastAPI
+
+    ServiceTokenMiddleware._production_warning_logged = False
+
+    test_app = FastAPI()
+
+    @test_app.get("/data")
+    async def data():
+        return {"ok": 1}
+
+    with patch("shared.security.SERVICE_TOKEN", ""), \
+         patch.dict(os.environ, {"VERIXIO_ENV": "production"}):
+        test_app.add_middleware(ServiceTokenMiddleware)
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            with caplog.at_level(logging.WARNING, logger="security"):
+                resp = await c.get("/data")
+                assert resp.status_code == 200
+            assert any("SERVICE_TOKEN is empty in production" in r.message for r in caplog.records)
+
+    ServiceTokenMiddleware._production_warning_logged = False

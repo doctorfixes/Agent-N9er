@@ -1,3 +1,4 @@
+import hmac
 import os
 import time
 import uuid
@@ -69,10 +70,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         key = request.headers.get("X-API-Key", "")
         token = request.headers.get("X-Service-Token", "")
 
-        if SERVICE_TOKEN and token == SERVICE_TOKEN:
+        if SERVICE_TOKEN and hmac.compare_digest(token, SERVICE_TOKEN):
             return await call_next(request)
 
-        if key != API_KEY:
+        if not hmac.compare_digest(key, API_KEY):
             logger.warning("Unauthorized request to %s from %s",
                            request.url.path, request.client.host if request.client else "unknown")
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
@@ -84,16 +85,24 @@ class ServiceTokenMiddleware(BaseHTTPMiddleware):
     """Validates X-Service-Token header on internal services."""
 
     OPEN_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+    _production_warning_logged = False
 
     async def dispatch(self, request: Request, call_next):
         if not SERVICE_TOKEN:
+            if not ServiceTokenMiddleware._production_warning_logged and \
+               os.getenv("VERIXIO_ENV", "development") == "production":
+                logger.warning(
+                    "SERVICE_TOKEN is empty in production environment. "
+                    "All requests will be allowed without token validation."
+                )
+                ServiceTokenMiddleware._production_warning_logged = True
             return await call_next(request)
 
         if request.url.path in self.OPEN_PATHS:
             return await call_next(request)
 
         token = request.headers.get("X-Service-Token", "")
-        if token != SERVICE_TOKEN:
+        if not hmac.compare_digest(token, SERVICE_TOKEN):
             logger.warning("Missing service token on %s from %s",
                            request.url.path, request.client.host if request.client else "unknown")
             return JSONResponse(status_code=403, content={"detail": "Invalid service token"})

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import logging
@@ -135,7 +136,7 @@ async def execute(request: ExecuteRequest):
     return result
 
 
-async def _execute_with_retry(request: ExecuteRequest) -> dict:
+async def _execute_with_retry(request: ExecuteRequest, backoff: float = 1.0) -> dict:
     last_result = None
     for attempt in range(MAX_RETRIES + 1):
         result = await _execute_live(request)
@@ -145,8 +146,10 @@ async def _execute_with_retry(request: ExecuteRequest) -> dict:
             return result
         last_result = result
         if attempt < MAX_RETRIES:
-            logger.warning("Execution failed for task %s, retry %d/%d",
-                          request.task_id, attempt + 1, MAX_RETRIES)
+            wait = backoff * (2 ** attempt)
+            logger.warning("Execution failed for task %s, retry %d/%d (backoff %.1fs)",
+                          request.task_id, attempt + 1, MAX_RETRIES, wait)
+            await asyncio.sleep(wait)
     last_result["retries"] = MAX_RETRIES
     return last_result
 
@@ -413,12 +416,8 @@ async def generate_proposal(req: ProposalRequest):
                 f"Platform: {req.platform}\n"
                 f"Job Title: {req.title}\n"
                 f"Description: {req.description}\n"
-                f"Required Skills: {req.skills}\n"
-                f"Client Budget: ${req.budget_max}" if req.budget_max else
-                f"Platform: {req.platform}\n"
-                f"Job Title: {req.title}\n"
-                f"Description: {req.description}\n"
                 f"Required Skills: {req.skills}"
+                + (f"\nClient Budget: ${req.budget_max}" if req.budget_max > 0 else "")
             ),
         },
     ]

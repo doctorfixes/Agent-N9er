@@ -15,8 +15,6 @@ from shared.logging_config import setup_logging
 
 logger = setup_logging("normalization")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-
 
 app = FastAPI(title="Agent N9er Normalization Service")
 
@@ -42,11 +40,11 @@ async def health():
 
 
 @app.post("/normalize")
-async def normalize(task: dict):
+async def normalize(task: NormalizeRequest):
     task_id = str(uuid.uuid4())
-    objective = str(task.get("objective", ""))
-    inputs = task.get("inputs", {})
-    source = task.get("source", "manual")
+    objective = task.objective
+    inputs = task.inputs
+    source = task.source
 
     classification = classify_task(objective, inputs)
 
@@ -60,7 +58,7 @@ async def normalize(task: dict):
         "leverage_score": classification["leverage_score"],
         "cost_tier": classification["cost_tier"],
         "classification": classification,
-        "raw": task,
+        "raw": task.model_dump(),
     }
     logger.info("Normalized task %s [%s/%s]: %s",
                 task_id, classification["category"], classification["tier"], objective[:80])
