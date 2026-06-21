@@ -359,6 +359,7 @@ services:
       - EVALUATOR_URL=http://evaluator:8800
       - PROSPECTOR_URL=http://prospector:8900
       - BILLING_URL=http://billing:9200
+      - BROWSER_SERVICE_URL=http://browser-service:8001
       - JWT_SECRET=${JWT_SECRET:-change-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS:-admin}

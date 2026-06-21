@@ -14,6 +14,9 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("ranking")
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
+
 app = FastAPI(title="Agent N9er Ranking Engine")
 
 app.add_middleware(RequestIDMiddleware)

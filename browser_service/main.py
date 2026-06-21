@@ -5,6 +5,8 @@ import asyncio
 import logging
 import hashlib
 import hmac
+import datetime
+from collections import deque
 
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +44,17 @@ app.add_middleware(
 )
 
 active_watchers = set()
+signal_log: deque = deque(maxlen=100)
+
+
+def _log_signal(source: str, event_type: str, objective: str) -> None:
+    signal_log.appendleft({
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": source,
+        "event_type": event_type,
+        "objective": objective,
+    })
+
 _watchers_lock = asyncio.Lock()
 
 VALID_WATCHERS = {"gmail", "drive", "slack", "notion", "airtable", "asana", "trello", "github"}
@@ -88,6 +101,11 @@ async def deactivate_watcher(name: str):
         active_watchers.discard(name)
     logger.info("Deactivated watcher: %s", name)
     return {"ok": 1, "watcher": name, "status": "inactive"}
+
+
+@app.get("/signals")
+async def list_signals():
+    return list(signal_log)
 
 
 async def _forward_to_pipeline(task: dict):
@@ -158,6 +176,7 @@ async def github_webhook(
                     "labels": [l["name"] for l in issue.get("labels", [])],
                 },
             }
+            _log_signal("github", "issue.opened", task["objective"])
             result = await _forward_to_pipeline(task)
             return {"ok": 1, "event": "issue.opened", "pipeline": result}
 
@@ -176,6 +195,7 @@ async def github_webhook(
                     "draft": pr.get("draft", False),
                 },
             }
+            _log_signal("github", f"pr.{action}", task["objective"])
             result = await _forward_to_pipeline(task)
             return {"ok": 1, "event": f"pr.{action}", "pipeline": result}
 
@@ -193,6 +213,7 @@ async def github_webhook(
                     "head_message": commits[-1].get("message", "")[:200],
                 },
             }
+            _log_signal("github", "push", task["objective"])
             result = await _forward_to_pipeline(task)
             return {"ok": 1, "event": "push", "pipeline": result}
 
@@ -241,6 +262,7 @@ async def slack_webhook(
                     "raw_text": text[:500],
                 },
             }
+            _log_signal("slack", "message.task", task["objective"])
             result = await _forward_to_pipeline(task)
             return {"ok": 1, "event": "message.task", "pipeline": result}
 
@@ -255,6 +277,7 @@ async def slack_webhook(
                 "raw_text": text[:500],
             },
         }
+        _log_signal("slack", "app_mention", task["objective"])
         result = await _forward_to_pipeline(task)
         return {"ok": 1, "event": "app_mention", "pipeline": result}
 
@@ -275,5 +298,6 @@ async def generic_webhook(payload: dict):
         "source": source,
         "inputs": payload.get("inputs", payload),
     }
+    _log_signal(source, "generic", objective)
     result = await _forward_to_pipeline(task)
     return {"ok": 1, "event": "generic", "pipeline": result}

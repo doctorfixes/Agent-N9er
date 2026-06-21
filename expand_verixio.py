@@ -149,4 +149,4 @@ for path, code in FILES.items():
         f.write(textwrap.dedent(code).strip() + "\n")
     print("Wrote:", path)
 
-print("\nVerixio monorepo generated successfully.")
+print("\nAgent N9er monorepo generated successfully.")

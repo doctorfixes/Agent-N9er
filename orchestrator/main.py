@@ -44,6 +44,18 @@ SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
 SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
 
+app = FastAPI(title="Agent N9er Orchestrator")
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)
+app.add_middleware(APIKeyMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 registered_agents = {}
 _agents_lock = asyncio.Lock()
 _scan_task: asyncio.Task | None = None
