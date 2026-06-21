@@ -46,9 +46,9 @@ export default function LoginPage() {
         background: "white", padding: "40px", borderRadius: "8px",
         boxShadow: "0 2px 10px rgba(0,0,0,0.1)", width: "100%", maxWidth: "380px",
       }}>
-        <h1 style={{ margin: "0 0 8px 0", fontSize: "1.5em" }}>Verixio</h1>
+        <h1 style={{ margin: "0 0 8px 0", fontSize: "1.5em" }}>Agent N9er</h1>
         <p style={{ margin: "0 0 24px 0", color: "#666", fontSize: "14px" }}>
-          Sign in to the dashboard
+          Sign in to Mission Control
         </p>
 
         <form onSubmit={handleSubmit}>
@@ -97,7 +97,7 @@ export default function LoginPage() {
             disabled={loading}
             style={{
               width: "100%", padding: "10px", fontSize: "14px", fontWeight: 600,
-              background: "#333", color: "white", border: "none", borderRadius: "4px",
+              background: "#111827", color: "white", border: "none", borderRadius: "6px",
               cursor: loading ? "not-allowed" : "pointer",
             }}
           >
