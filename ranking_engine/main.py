@@ -14,7 +14,7 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("ranking")
 
-app = FastAPI(title="Verixio Ranking Engine")
+app = FastAPI(title="Agent N9er Ranking Engine")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

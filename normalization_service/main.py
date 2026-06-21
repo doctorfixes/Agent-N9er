@@ -15,7 +15,7 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("normalization")
 
-app = FastAPI(title="Verixio Normalization Service")
+app = FastAPI(title="Agent N9er Normalization Service")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

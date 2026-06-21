@@ -108,7 +108,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Verixio Bidding Marketplace", lifespan=lifespan)
+app = FastAPI(title="Agent N9er Bidding Marketplace", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

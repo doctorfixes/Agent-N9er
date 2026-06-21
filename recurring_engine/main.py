@@ -66,7 +66,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Verixio Recurring Engine", lifespan=lifespan)
+app = FastAPI(title="Agent N9er Recurring Engine", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

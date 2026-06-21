@@ -29,7 +29,7 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 
-app = FastAPI(title="Verixio Browser Service")
+app = FastAPI(title="Agent N9er Browser Service")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RateLimitMiddleware, max_requests=RATE_LIMIT_MAX_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)

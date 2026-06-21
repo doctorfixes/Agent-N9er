@@ -58,7 +58,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Verixio Reputation Ledger", lifespan=lifespan)
+app = FastAPI(title="Agent N9er Reputation Ledger", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

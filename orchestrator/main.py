@@ -111,7 +111,7 @@ def _svc_headers(request=None):
     return headers
 
 
-app = FastAPI(title="Verixio Orchestrator", lifespan=lifespan)
+app = FastAPI(title="Agent N9er Orchestrator", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RateLimitMiddleware, max_requests=RATE_LIMIT_MAX_REQUESTS, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
