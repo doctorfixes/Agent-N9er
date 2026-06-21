@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
-from shared.llm import estimate_cost, select_tier, MODEL_TIERS, MARKUP_MULTIPLIER
+from shared.llm import estimate_cost, select_tier, get_model_tiers, MARKUP_MULTIPLIER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("evaluator")
@@ -218,7 +218,7 @@ async def pricing():
         "model_tiers": {k: {"model": v["model"], "label": v["label"],
                             "input_cost_per_m": v["input_cost_per_m"],
                             "output_cost_per_m": v["output_cost_per_m"]}
-                        for k, v in MODEL_TIERS.items()},
+                        for k, v in get_model_tiers().items()},
     }
 
 
