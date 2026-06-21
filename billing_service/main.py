@@ -95,6 +95,9 @@ async def _init_db():
                 FOREIGN KEY (invoice_id) REFERENCES invoices(invoice_id)
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_platform ON invoices(platform)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at)")
         await db.commit()
 
 

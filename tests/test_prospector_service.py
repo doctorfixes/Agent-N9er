@@ -27,6 +27,13 @@ async def reset_db():
         pass
 
 
+@pytest.fixture(autouse=True)
+def reset_scan_cooldown():
+    prospector._last_scan_time.clear()
+    yield
+    prospector._last_scan_time.clear()
+
+
 @pytest.fixture
 async def client():
     async with prospector.lifespan(prospector.app):
@@ -85,6 +92,7 @@ class TestScan:
 
         with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
             await client.post("/scan", json={"platform": "upwork"})
+            prospector._last_scan_time.clear()
             resp = await client.post("/scan", json={"platform": "upwork"})
 
         assert resp.json()["new"] == 0

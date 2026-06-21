@@ -73,7 +73,12 @@ class CostEstimate:
 
 
 def estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+    if not text:
+        return 1
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    tokens = ascii_chars / 4.0 + non_ascii_chars / 1.5
+    return max(1, int(tokens))
 
 
 def estimate_cost(

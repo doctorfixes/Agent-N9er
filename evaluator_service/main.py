@@ -105,6 +105,9 @@ async def _init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_evals_platform ON evaluations(platform)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_evals_viable ON evaluations(viable)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_evals_created ON evaluations(created_at)")
         await db.commit()
 
 

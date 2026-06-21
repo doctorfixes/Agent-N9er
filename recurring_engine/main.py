@@ -35,6 +35,7 @@ async def _init_db():
                 category TEXT DEFAULT 'uncategorized'
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rules_category ON rules(category)")
         await db.commit()
 
 

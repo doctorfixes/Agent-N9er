@@ -3,6 +3,7 @@ import os
 import sys
 import re
 import json
+import time
 import uuid
 import logging
 import smtplib
@@ -39,6 +40,9 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "")
 NOTIFY_MIN_BUDGET = float(os.getenv("NOTIFY_MIN_BUDGET", "100"))
 AUTO_EVALUATE = os.getenv("AUTO_EVALUATE", "false").lower() == "true"
+SCAN_COOLDOWN_SECONDS = int(os.getenv("SCAN_COOLDOWN_SECONDS", "60"))
+
+_last_scan_time: dict[str, float] = {}
 
 UPWORK_RSS_BASE = "https://www.upwork.com/ab/feed/jobs/rss"
 UPWORK_SEARCH_CATEGORIES = os.getenv(
@@ -287,6 +291,13 @@ async def scan(req: ScanRequest):
     scan_fn = SCANNERS.get(req.platform)
     if not scan_fn:
         raise HTTPException(status_code=400, detail=f"No scanner implemented for: {req.platform}")
+
+    now = time.monotonic()
+    last = _last_scan_time.get(req.platform, 0)
+    if now - last < SCAN_COOLDOWN_SECONDS:
+        remaining = int(SCAN_COOLDOWN_SECONDS - (now - last))
+        raise HTTPException(status_code=429, detail=f"Scan cooldown: retry in {remaining}s")
+    _last_scan_time[req.platform] = now
 
     prospects = await scan_fn(req.query, req.category, req.max_results)
 
@@ -1004,12 +1015,19 @@ async def _send_prospect_alert(prospects: list[dict]):
                 server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _do_send)
-        logger.info("Sent prospect alert to %s (%d prospects)", NOTIFY_EMAIL, len(prospects))
-    except Exception as e:
-        logger.warning("Failed to send prospect alert: %s", e)
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _do_send)
+            logger.info("Sent prospect alert to %s (%d prospects)", NOTIFY_EMAIL, len(prospects))
+            return
+        except Exception as e:
+            if attempt < max_retries:
+                logger.warning("Email attempt %d/%d failed: %s — retrying", attempt, max_retries, e)
+                await asyncio.sleep(2 ** attempt)
+            else:
+                logger.error("Email alert failed after %d attempts: %s", max_retries, e)
 
 
 async def _auto_evaluate_batch(prospects: list[dict]) -> int:

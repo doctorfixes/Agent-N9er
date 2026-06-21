@@ -44,9 +44,13 @@ SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
 SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
 
+AUTO_RECURRING_ENABLED = os.getenv("AUTO_RECURRING_ENABLED", "false").lower() == "true"
+RECURRING_INTERVAL = int(os.getenv("RECURRING_INTERVAL_SECONDS", "300"))
+
 registered_agents = {}
 _agents_lock = asyncio.Lock()
 _scan_task: asyncio.Task | None = None
+_recurring_task: asyncio.Task | None = None
 _scan_state = {
     "running": False,
     "last_scan_at": None,
@@ -162,21 +166,56 @@ async def _run_scan_cycle():
     return results
 
 
+async def _recurring_loop():
+    while True:
+        try:
+            await asyncio.sleep(RECURRING_INTERVAL)
+            svc = _svc_headers()
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                tick_resp = await client.get(f"{RECURRING_URL}/tick", headers=svc)
+                tick_resp.raise_for_status()
+                tasks = tick_resp.json()
+
+            for task in tasks:
+                try:
+                    pipeline_req = PipelineRequest(
+                        objective=task.get("objective", ""),
+                        source=task.get("source", "recurring"),
+                        inputs=task.get("inputs", {}),
+                        mode="production",
+                    )
+                    await full_pipeline(pipeline_req)
+                except Exception as e:
+                    logger.error("Recurring task failed: %s", e)
+
+            if tasks:
+                logger.info("Recurring loop processed %d tasks", len(tasks))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Recurring loop error: %s", e)
+            await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app):
-    global _scan_task
+    global _scan_task, _recurring_task
     await _init_db()
     await _load_agents()
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
         logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
+    if AUTO_RECURRING_ENABLED:
+        _recurring_task = asyncio.create_task(_recurring_loop())
+        logger.info("Auto-recurring enabled: interval=%ds", RECURRING_INTERVAL)
     yield
-    if _scan_task:
-        _scan_task.cancel()
-        try:
-            await _scan_task
-        except asyncio.CancelledError:
-            pass
+    for task in (_scan_task, _recurring_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def _svc_headers(request=None):
