@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_service_headers
 from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
 from shared.retry import retry_request
-from shared.llm import complete, estimate_cost, select_tier, OPENROUTER_API_KEY
+from shared.llm import complete, estimate_cost, has_available_provider, select_tier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("execution")
@@ -109,7 +109,7 @@ async def health():
             "ok": 1,
             "service": "execution",
             "total_executions": count,
-            "mode": "live" if OPENROUTER_API_KEY else "simulation",
+            "mode": "live" if has_available_provider() else "simulation",
         }
     except Exception:
         return {"ok": 0, "service": "execution", "error": "db_unreachable"}
@@ -117,7 +117,7 @@ async def health():
 
 @app.post("/execute")
 async def execute(request: ExecuteRequest):
-    if OPENROUTER_API_KEY and request.objective:
+    if has_available_provider() and request.objective:
         result = await _execute_with_retry(request)
     else:
         result = await _execute_simulation(request)
@@ -383,7 +383,7 @@ async def analytics(days: int = Query(default=30, ge=1, le=365)):
 
 @app.post("/proposal")
 async def generate_proposal(req: ProposalRequest):
-    if not OPENROUTER_API_KEY:
+    if not has_available_provider():
         return _simulated_proposal(req)
 
     tone_map = {

@@ -110,6 +110,29 @@ async def test_execution_with_objective_but_no_key(client):
     assert data["mode"] == "simulation"
 
 
+async def test_execution_live_mode_with_direct_provider(client):
+    llm_result = MagicMock(
+        content="done",
+        model="claude-3-5-haiku-latest",
+        input_tokens=10,
+        output_tokens=20,
+        cost_usd=0.001,
+        latency_ms=50.0,
+        finish_reason="stop",
+    )
+    with _mock_reputation(), \
+            patch.object(execution, "has_available_provider", return_value=True), \
+            patch.object(execution, "complete", AsyncMock(return_value=llm_result)):
+        resp = await client.post("/execute", json={
+            "task_id": "live1", "agent_id": "a1", "objective": "Write a hello world in Python",
+        })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["mode"] == "live"
+    assert data["model"] == "claude-3-5-haiku-latest"
+    assert data["output_preview"] == "done"
+
+
 async def test_get_execution_output(client):
     with _mock_reputation():
         await client.post("/execute", json={"task_id": "out1", "agent_id": "a1", "confidence": 0.9})

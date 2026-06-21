@@ -4,7 +4,15 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shared.llm import estimate_cost, estimate_tokens, select_tier, MODEL_TIERS
+from shared.llm import (
+    MODEL_TIERS,
+    estimate_cost,
+    estimate_tokens,
+    get_active_provider,
+    get_model_tiers,
+    has_available_provider,
+    select_tier,
+)
 
 
 class TestEstimateTokens:
@@ -71,3 +79,48 @@ class TestSelectTier:
 
     def test_unknown_defaults_standard(self):
         assert select_tier("unknown_level") == "standard"
+
+
+class TestProviderSelection:
+    def test_no_provider_when_no_keys(self, monkeypatch):
+        for key in [
+            "LLM_PROVIDER",
+            "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "AZURE_OPENAI_ENDPOINT",
+            "GEMINI_API_KEY",
+        ]:
+            monkeypatch.delenv(key, raising=False)
+        assert get_active_provider() is None
+        assert has_available_provider() is False
+
+    def test_auto_selects_anthropic_when_configured(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        assert get_active_provider() == "anthropic"
+        assert has_available_provider() is True
+
+    def test_explicit_provider_override(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        assert get_active_provider() == "openai"
+
+    def test_model_tiers_change_by_provider(self):
+        anthropic_tiers = get_model_tiers("anthropic")
+        openai_tiers = get_model_tiers("openai")
+        assert anthropic_tiers["standard"]["model"] != MODEL_TIERS["standard"]["model"]
+        assert openai_tiers["budget"]["model"] == "gpt-4o-mini"
+
+    def test_minimum_budget_uses_budget_for_direct_provider(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        assert select_tier("expert", budget_constraint="minimum") == "budget"
