@@ -74,6 +74,7 @@ class PipelineRequest(BaseModel):
     source: str = "manual"
     inputs: dict = {}
     mode: str = "production"
+    deadline: str | None = None
 
 
 async def _init_db():
@@ -346,6 +347,7 @@ async def pipeline(task: PipelineRequest):
                 "priority_score": ranked["priority_score"],
                 "inputs": normalized.get("inputs", {}),
                 "source": normalized.get("source", "manual"),
+                "deadline": normalized.get("deadline"),
             }
             await retry_post(client, f"{MARKETPLACE_URL}/publish", json=publish_payload, headers=svc)
 

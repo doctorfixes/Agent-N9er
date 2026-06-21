@@ -32,6 +32,7 @@ class NormalizeRequest(BaseModel):
     objective: str = ""
     inputs: dict = {}
     source: str = "manual"
+    deadline: str | None = None
 
 
 @app.get("/health")
@@ -53,6 +54,7 @@ async def normalize(task: NormalizeRequest):
         "objective": objective,
         "inputs": inputs,
         "source": source,
+        "deadline": task.deadline,
         "category": classification["category"],
         "tier": classification["tier"],
         "leverage_score": classification["leverage_score"],

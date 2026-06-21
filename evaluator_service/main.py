@@ -3,6 +3,7 @@ import sys
 import uuid
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException
@@ -40,6 +41,7 @@ class EvaluateRequest(BaseModel):
     budget_min: float = 0
     budget_max: float = 0
     skills_required: list[str] = Field(default_factory=list)
+    deadline: str | None = None
 
 
 class EvaluationResult(BaseModel):
@@ -54,6 +56,7 @@ class EvaluationResult(BaseModel):
     quoted_price_usd: float
     markup_multiplier: float
     estimated_profit_usd: float
+    rush_multiplier: float = 1.0
     rejection_reason: str | None = None
 
 
@@ -75,6 +78,27 @@ NON_VIABLE_SIGNALS = [
     "phone call", "video call", "in-person", "on-site", "physical",
     "hardware", "soldering", "printing", "shipping",
 ]
+
+
+def compute_rush_multiplier(deadline: str | None) -> float:
+    if not deadline:
+        return 1.0
+    try:
+        dl = datetime.fromisoformat(deadline)
+        if dl.tzinfo is None:
+            dl = dl.replace(tzinfo=timezone.utc)
+        hours_left = (dl - datetime.now(timezone.utc)).total_seconds() / 3600
+        if hours_left <= 0:
+            return 2.0
+        elif hours_left <= 4:
+            return 1.75
+        elif hours_left <= 24:
+            return 1.5
+        elif hours_left <= 72:
+            return 1.25
+        return 1.0
+    except (ValueError, TypeError):
+        return 1.0
 
 
 def check_viability(title: str, description: str) -> str | None:
@@ -159,7 +183,8 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
     prompt_text = f"{req.title}\n{req.description}"
     cost_est = estimate_cost(prompt_text, tier=tier, expected_output_tokens=output_tokens)
 
-    quoted = max(cost_est.quoted_price_usd, MINIMUM_QUOTE_USD)
+    rush = compute_rush_multiplier(req.deadline)
+    quoted = max(cost_est.quoted_price_usd * rush, MINIMUM_QUOTE_USD)
 
     if req.budget_max > 0 and quoted > req.budget_max * 1.5:
         rejection = f"Quoted ${quoted:.2f} exceeds client budget ${req.budget_max:.2f} by too much"
@@ -181,6 +206,7 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
         quoted_price_usd=quoted if viable else 0,
         markup_multiplier=MARKUP_MULTIPLIER,
         estimated_profit_usd=round(profit, 4),
+        rush_multiplier=rush,
         rejection_reason=rejection,
     )
     await _persist_evaluation(result, req.platform, req.title)

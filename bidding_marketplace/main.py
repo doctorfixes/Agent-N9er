@@ -26,6 +26,7 @@ class PublishRequest(BaseModel):
     priority_score: float = 0.0
     inputs: dict = Field(default_factory=dict)
     source: str = "manual"
+    deadline: str | None = None
 
 
 class BidRequest(BaseModel):
@@ -61,7 +62,8 @@ async def init_db():
                 inputs TEXT DEFAULT '{}',
                 source TEXT DEFAULT 'manual',
                 published_at TEXT,
-                awarded_to TEXT
+                awarded_to TEXT,
+                deadline TEXT
             )
         """)
         await db.execute("""
@@ -138,9 +140,9 @@ async def publish(task: PublishRequest):
     now = datetime.now(timezone.utc).isoformat()
     async with _get_db() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO tasks (id, objective, priority_score, status, inputs, source, published_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO tasks (id, objective, priority_score, status, inputs, source, published_at, deadline) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (task.id, task.objective, task.priority_score, "open",
-             json.dumps(task.inputs), task.source, now)
+             json.dumps(task.inputs), task.source, now, task.deadline)
         )
         await _audit(db, "publish", "task", task.id, f"source={task.source}")
         await db.commit()

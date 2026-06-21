@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,15 +62,38 @@ async def rank(task: dict):
     tier = task.get("tier", "")
     tier_boost = {"highest_leverage": 3.0, "high_roi": 2.0, "operational": 1.0, "creative_technical": 0.5}.get(tier, 0)
 
-    priority_score = round(base_score + keyword_boost + value_boost + tier_boost, 2)
+    urgency_boost = 0.0
+    deadline = task.get("deadline")
+    if deadline:
+        try:
+            dl = datetime.fromisoformat(deadline)
+            if dl.tzinfo is None:
+                dl = dl.replace(tzinfo=timezone.utc)
+            hours_left = (dl - datetime.now(timezone.utc)).total_seconds() / 3600
+            if hours_left <= 0:
+                urgency_boost = 5.0
+            elif hours_left <= 4:
+                urgency_boost = 4.0
+            elif hours_left <= 24:
+                urgency_boost = 3.0
+            elif hours_left <= 72:
+                urgency_boost = 2.0
+            elif hours_left <= 168:
+                urgency_boost = 1.0
+        except (ValueError, TypeError):
+            pass
 
-    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f) category=%s",
+    priority_score = round(base_score + keyword_boost + value_boost + tier_boost + urgency_boost, 2)
+
+    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f urg=%.1f) category=%s",
                 task["id"], priority_score, base_score, keyword_boost, value_boost, tier_boost,
-                task.get("category", "unknown"))
+                urgency_boost, task.get("category", "unknown"))
     return {
         "id": task["id"],
         "priority_score": priority_score,
         "category": task.get("category"),
         "tier": tier,
         "value_score": round(value_boost, 2),
+        "urgency_boost": urgency_boost,
+        "deadline": deadline,
     }
