@@ -18,6 +18,7 @@ from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, MaxBody
 from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
 from shared.retry import retry_request
 from shared.llm import complete, estimate_cost, select_tier, OPENROUTER_API_KEY
+from shared.guardrails import check_output_safety
 from shared.logging_config import setup_logging
 
 logger = setup_logging("execution")
@@ -184,6 +185,14 @@ async def _execute_live(request: ExecuteRequest) -> dict:
         llm_result = await complete(messages, tier=tier)
 
         success = llm_result.finish_reason in ("stop", "end_turn")
+
+        output_violations = check_output_safety(llm_result.content)
+        output_blocked = [v for v in output_violations if v.severity == "blocked"]
+        if output_blocked:
+            logger.warning("Output blocked by safety check for task %s: %s",
+                           request.task_id, output_blocked[0].reason)
+            success = False
+
         output_preview = llm_result.content[:500]
 
         async with _get_db() as db:

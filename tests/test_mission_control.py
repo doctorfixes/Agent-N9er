@@ -92,6 +92,8 @@ def _mock_full_pipeline():
     async def mock_get(url, **kwargs):
         if "tick" in url:
             return _make_response([{"id": "gen-1", "objective": "recurring task", "source": "recurring"}])
+        if "/confidence/" in url:
+            return _make_response({"adjusted_confidence": 0.5, "adjustment_source": "no_history"})
         return _make_response([])
 
     mock_client = AsyncMock()

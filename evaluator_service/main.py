@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
 from shared.llm import estimate_cost, select_tier, MODEL_TIERS, MARKUP_MULTIPLIER
+from shared.guardrails import check_task_content, check_spending_limits
 from shared.logging_config import setup_logging
 
 logger = setup_logging("evaluator")
@@ -162,6 +163,22 @@ async def health():
 @app.post("/evaluate")
 async def evaluate(req: EvaluateRequest) -> EvaluationResult:
     evaluation_id = str(uuid.uuid4())
+
+    content_violations = check_task_content(req.title, req.description, " ".join(req.skills_required))
+    blocked = [v for v in content_violations if v.severity == "blocked"]
+    if blocked:
+        rejection = f"Policy violation: {blocked[0].reason}"
+        result = EvaluationResult(
+            evaluation_id=evaluation_id, viable=False, complexity="unknown",
+            recommended_tier="none", recommended_model="none",
+            estimated_input_tokens=0, estimated_output_tokens=0,
+            estimated_cost_usd=0, quoted_price_usd=0,
+            markup_multiplier=MARKUP_MULTIPLIER, estimated_profit_usd=0,
+            rejection_reason=rejection,
+        )
+        await _persist_evaluation(result, req.platform, req.title)
+        logger.warning("Task rejected by guardrails: %s — %s", req.title[:50], rejection)
+        return result
 
     rejection = check_viability(req.title, req.description)
     if rejection:

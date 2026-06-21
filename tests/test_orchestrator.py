@@ -68,8 +68,14 @@ def _mock_pipeline():
             return _make_response({"ok": 1})
         return _make_response({})
 
+    async def mock_get(url, **kwargs):
+        if "/confidence/" in url:
+            return _make_response({"adjusted_confidence": 0.5, "adjustment_source": "no_history"})
+        return _make_response({})
+
     mock_client = AsyncMock()
     mock_client.post = mock_post
+    mock_client.get = mock_get
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
     return mock_client, normalized, ranked

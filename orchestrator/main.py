@@ -23,6 +23,7 @@ from shared.config import (
     CORS_ORIGINS,
 )
 from shared.retry import retry_post
+from shared.guardrails import run_all_checks
 from shared.logging_config import setup_logging
 
 logger = setup_logging("orchestrator")
@@ -36,6 +37,7 @@ RECURRING_URL = os.getenv("RECURRING_URL", "http://localhost:8600")
 PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
+MEMORY_URL = os.getenv("MEMORY_URL", "http://localhost:9300")
 
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
@@ -333,6 +335,13 @@ async def trigger_scan():
 
 @app.post("/pipeline")
 async def pipeline(task: PipelineRequest):
+    guardrail_result = run_all_checks(title=task.objective, description=str(task.inputs))
+    if guardrail_result["decision"] == "blocked":
+        raise HTTPException(
+            status_code=403,
+            detail=f"Task blocked by safety policy: {guardrail_result['violations'][0]['reason']}"
+        )
+
     try:
         svc = _svc_headers()
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
@@ -391,6 +400,17 @@ async def full_pipeline(task: PipelineRequest):
                 boost = get_specialization_boost(specialization, category)
                 adjusted_confidence = min(1.0, base_confidence + boost)
 
+                try:
+                    mem_resp = await client.get(
+                        f"{MEMORY_URL}/confidence/{agent_id}",
+                        params={"category": category, "base_confidence": adjusted_confidence},
+                        headers=svc,
+                    )
+                    if mem_resp.status_code == 200:
+                        adjusted_confidence = mem_resp.json().get("adjusted_confidence", adjusted_confidence)
+                except httpx.RequestError:
+                    pass
+
                 bid_payload = {
                     "task_id": task_id,
                     "agent_id": agent_id,
@@ -428,6 +448,23 @@ async def full_pipeline(task: PipelineRequest):
 
             logger.info("Full pipeline complete for task %s [%s]: %s (agent %s)",
                         task_id, category, status, winner["agent_id"])
+
+            try:
+                await client.post(f"{MEMORY_URL}/outcomes", json={
+                    "task_id": task_id,
+                    "agent_id": winner["agent_id"],
+                    "platform": task.source,
+                    "category": category,
+                    "success": exec_data.get("success", False),
+                    "actual_cost_usd": exec_data.get("cost_usd", 0),
+                    "actual_tokens": exec_data.get("input_tokens", 0) + exec_data.get("output_tokens", 0),
+                    "duration_seconds": exec_data.get("duration", 0),
+                    "tier": exec_data.get("tier", ""),
+                    "model": exec_data.get("model", ""),
+                }, headers=svc)
+            except httpx.RequestError:
+                logger.warning("Failed to record outcome for task %s", task_id)
+
             return {
                 "status": status,
                 "task_id": task_id,
@@ -578,7 +615,22 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 "duration": exec_data.get("duration"),
                             }
 
-                            # Update prospect status
+                            try:
+                                await client.post(f"{MEMORY_URL}/outcomes", json={
+                                    "task_id": pid,
+                                    "platform": req.platform,
+                                    "category": evaluation.get("complexity", "moderate"),
+                                    "complexity": evaluation.get("complexity", "moderate"),
+                                    "success": True,
+                                    "estimated_cost_usd": cost,
+                                    "actual_cost_usd": exec_data.get("cost_usd", 0),
+                                    "quoted_price_usd": quoted,
+                                    "duration_seconds": exec_data.get("duration", 0),
+                                    "model": exec_data.get("model", ""),
+                                }, headers=svc)
+                            except httpx.RequestError:
+                                pass
+
                             await client.patch(
                                 f"{PROSPECTOR_URL}/prospects/{pid}",
                                 json={"status": "delivered"},
