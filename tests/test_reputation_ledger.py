@@ -154,3 +154,60 @@ async def test_agent_includes_rating_fields(client):
     assert agent["total_ratings"] == 1
     assert agent["avg_rating"] == 4.0
     assert agent["jobs_completed"] == 1
+
+
+# --- Nickname tests ---
+
+async def test_register_with_nickname(client):
+    resp = await client.post("/register", json={"agent_id": "nick1", "profile": "test", "nickname": "ShadowRunner"})
+    assert resp.json()["ok"] == 1
+    assert resp.json()["nickname"] == "ShadowRunner"
+    agent = (await client.get("/agent/nick1")).json()
+    assert agent["nickname"] == "ShadowRunner"
+
+
+async def test_set_nickname(client):
+    await client.post("/register", json={"agent_id": "nick2", "profile": "test"})
+    resp = await client.patch("/agent/nick2/nickname", json={"nickname": "ByteWolf"})
+    assert resp.json()["ok"] == 1
+    assert resp.json()["nickname"] == "ByteWolf"
+    agent = (await client.get("/agent/nick2")).json()
+    assert agent["nickname"] == "ByteWolf"
+
+
+async def test_update_nickname(client):
+    await client.post("/register", json={"agent_id": "nick3", "profile": "test", "nickname": "OldName"})
+    await client.patch("/agent/nick3/nickname", json={"nickname": "NewName"})
+    agent = (await client.get("/agent/nick3")).json()
+    assert agent["nickname"] == "NewName"
+
+
+async def test_nickname_too_long_rejected(client):
+    await client.post("/register", json={"agent_id": "nick4", "profile": "test"})
+    resp = await client.patch("/agent/nick4/nickname", json={"nickname": "A" * 33})
+    assert resp.status_code == 422
+
+
+async def test_nickname_nonexistent_agent(client):
+    resp = await client.patch("/agent/ghost/nickname", json={"nickname": "Phantom"})
+    assert resp.status_code == 404
+
+
+async def test_nickname_preserved_after_update(client):
+    await client.post("/register", json={"agent_id": "nick5", "profile": "test", "nickname": "Keeper"})
+    await client.post("/update", json={"agent_id": "nick5", "success": True})
+    agent = (await client.get("/agent/nick5")).json()
+    assert agent["nickname"] == "Keeper"
+    assert agent["success"] == 1
+
+
+async def test_nickname_in_ledger(client):
+    await client.post("/register", json={"agent_id": "nick6", "profile": "test", "nickname": "TopDog"})
+    ledger = (await client.get("/ledger")).json()
+    assert ledger["nick6"]["nickname"] == "TopDog"
+
+
+async def test_empty_nickname_allowed(client):
+    await client.post("/register", json={"agent_id": "nick7", "profile": "test"})
+    agent = (await client.get("/agent/nick7")).json()
+    assert agent["nickname"] == ""

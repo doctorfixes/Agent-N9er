@@ -21,6 +21,7 @@ DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
 class RegisterRequest(BaseModel):
     agent_id: str
     profile: str = ""
+    nickname: str = ""
 
 
 class UpdateRequest(BaseModel):
@@ -34,6 +35,10 @@ class RatingRequest(BaseModel):
     rating: int
     client_email: str = ""
     comment: str = ""
+
+
+class NicknameRequest(BaseModel):
+    nickname: str
 
 
 @asynccontextmanager
@@ -50,6 +55,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS agents (
                 agent_id TEXT PRIMARY KEY,
                 profile TEXT DEFAULT '',
+                nickname TEXT DEFAULT '',
                 success INTEGER DEFAULT 0,
                 fail INTEGER DEFAULT 0,
                 score REAL DEFAULT 0.5,
@@ -89,7 +95,7 @@ app.add_middleware(ServiceTokenMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
 
@@ -109,13 +115,31 @@ async def health():
 async def register(agent: RegisterRequest):
     async with _get_db() as db:
         await db.execute(
-            "INSERT OR IGNORE INTO agents (agent_id, profile) VALUES (?, ?)",
-            (agent.agent_id, agent.profile)
+            "INSERT OR IGNORE INTO agents (agent_id, profile, nickname) VALUES (?, ?, ?)",
+            (agent.agent_id, agent.profile, agent.nickname)
         )
         await db.commit()
 
-    logger.info("Registered agent %s (%s)", agent.agent_id, agent.profile)
-    return {"ok": 1, "agent_id": agent.agent_id}
+    logger.info("Registered agent %s (%s) nickname=%s", agent.agent_id, agent.profile, agent.nickname or "(none)")
+    return {"ok": 1, "agent_id": agent.agent_id, "nickname": agent.nickname}
+
+
+@app.patch("/agent/{agent_id}/nickname")
+async def set_nickname(agent_id: str, req: NicknameRequest):
+    nickname = req.nickname.strip()
+    if len(nickname) > 32:
+        raise HTTPException(status_code=422, detail="Nickname must be 32 characters or fewer")
+
+    async with _get_db() as db:
+        cursor = await db.execute("SELECT agent_id FROM agents WHERE agent_id = ?", (agent_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        await db.execute("UPDATE agents SET nickname = ? WHERE agent_id = ?", (nickname, agent_id))
+        await db.commit()
+
+    logger.info("Agent %s nickname set to '%s'", agent_id, nickname)
+    return {"ok": 1, "agent_id": agent_id, "nickname": nickname}
 
 
 @app.post("/update")
@@ -139,8 +163,8 @@ async def update(record: UpdateRequest):
             score = max(0.0, score - 0.02)
 
         await db.execute(
-            "INSERT OR REPLACE INTO agents (agent_id, profile, success, fail, score) VALUES (?, ?, ?, ?, ?)",
-            (record.agent_id, row["profile"] if row else "", success, fail, round(score, 4))
+            "INSERT OR REPLACE INTO agents (agent_id, profile, nickname, success, fail, score) VALUES (?, ?, ?, ?, ?, ?)",
+            (record.agent_id, row["profile"] if row else "", row["nickname"] if row else "", success, fail, round(score, 4))
         )
         await db.commit()
 
@@ -213,14 +237,11 @@ def _agent_to_dict(row):
         "fail": row["fail"],
         "score": row["score"],
     }
-    try:
-        d["total_ratings"] = row["total_ratings"]
-        d["avg_rating"] = row["avg_rating"]
-        d["jobs_completed"] = row["jobs_completed"]
-    except (IndexError, KeyError):
-        d["total_ratings"] = 0
-        d["avg_rating"] = 0.0
-        d["jobs_completed"] = 0
+    for key, default in [("nickname", ""), ("total_ratings", 0), ("avg_rating", 0.0), ("jobs_completed", 0)]:
+        try:
+            d[key] = row[key]
+        except (IndexError, KeyError):
+            d[key] = default
     return d
 
 

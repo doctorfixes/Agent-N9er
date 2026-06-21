@@ -19,7 +19,7 @@ export default function LeaderboardPage() {
 
   const agents = data ?? {};
   const entries = Object.entries(agents)
-    .map(([id, stats]) => ({ id, ...stats, total: (stats.success || 0) + (stats.fail || 0) }))
+    .map(([id, stats]) => ({ id, ...stats, total: (stats.success || 0) + (stats.fail || 0), displayName: stats.nickname || id.slice(0, 12) }))
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
   const topScore = entries[0]?.score ?? 0;
@@ -44,24 +44,28 @@ export default function LeaderboardPage() {
               <tr style={{ borderBottom: "2px solid #e5e7eb", textAlign: "left", background: "#f9fafb" }}>
                 <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "60px" }}>Rank</th>
                 <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151" }}>Agent</th>
+                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "90px" }}>Rating</th>
+                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "70px" }}>Jobs</th>
                 <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "80px" }}>Wins</th>
                 <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "80px" }}>Losses</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "80px" }}>Total</th>
                 <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "100px" }}>Score</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "120px" }}>Win Rate</th>
               </tr>
             </thead>
             <tbody>
               {entries.map((agent, i) => {
-                const winRate = agent.total > 0 ? ((agent.success || 0) / agent.total * 100).toFixed(1) : "0.0";
                 const barWidth = topScore > 0 ? ((agent.score ?? 0) / topScore * 100) : 0;
+                const stars = agent.avg_rating ? agent.avg_rating.toFixed(1) : "-";
                 return (
                   <tr key={agent.id} style={{ borderBottom: "1px solid #f3f4f6", background: i < 3 ? "#fefce8" : "transparent" }}>
                     <td style={{ padding: "10px 14px", textAlign: "center" }}><Medal rank={i + 1} /></td>
-                    <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: "12px" }}>{agent.id.slice(0, 12)}</td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <div style={{ fontWeight: 600, fontSize: "13px" }}>{agent.displayName}</div>
+                      {agent.nickname && <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#9ca3af" }}>{agent.id.slice(0, 12)}</div>}
+                    </td>
+                    <td style={{ padding: "10px 14px", fontWeight: 600, color: "#f59e0b" }}>{stars} {agent.total_ratings ? `(${agent.total_ratings})` : ""}</td>
+                    <td style={{ padding: "10px 14px", color: "#374151" }}>{agent.jobs_completed || 0}</td>
                     <td style={{ padding: "10px 14px", color: "#16a34a", fontWeight: 600 }}>{agent.success || 0}</td>
                     <td style={{ padding: "10px 14px", color: "#dc2626" }}>{agent.fail || 0}</td>
-                    <td style={{ padding: "10px 14px" }}>{agent.total}</td>
                     <td style={{ padding: "10px 14px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                         <div style={{ flex: 1, height: "6px", background: "#f3f4f6", borderRadius: "3px", overflow: "hidden" }}>
@@ -70,7 +74,6 @@ export default function LeaderboardPage() {
                         <span style={{ fontWeight: 600, minWidth: "30px", textAlign: "right" }}>{agent.score ?? 0}</span>
                       </div>
                     </td>
-                    <td style={{ padding: "10px 14px", fontFamily: "monospace", fontSize: "12px" }}>{winRate}%</td>
                   </tr>
                 );
               })}
