@@ -11,8 +11,11 @@ from agent_personalities import (
 from runner import run
 from task_generator import gen, TASK_TEMPLATES
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("simulation")
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.logging_config import setup_logging
+
+logger = setup_logging("simulation")
 
 app = FastAPI(title="Agent N9er Simulation Engine")
 

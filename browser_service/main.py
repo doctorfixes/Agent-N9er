@@ -23,9 +23,9 @@ from shared.config import (
     RATE_LIMIT_WINDOW_SECONDS, CORS_ORIGINS,
 )
 from shared.retry import retry_request
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("browser_service")
+logger = setup_logging("browser_service")
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")

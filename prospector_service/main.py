@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("prospector")
+logger = setup_logging("prospector")
 
 DB_PATH = os.getenv("PROSPECTOR_DB_PATH", "/data/prospector.db")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")

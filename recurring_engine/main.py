@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.task_taxonomy import list_categories, TaskCategory
 from shared.config import CORS_ORIGINS
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("recurring")
+logger = setup_logging("recurring")
 
 DB_PATH = os.getenv("RECURRING_DB_PATH", "/data/recurring.db")
 

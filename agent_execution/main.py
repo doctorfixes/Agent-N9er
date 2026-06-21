@@ -17,9 +17,9 @@ from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_ser
 from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
 from shared.retry import retry_request
 from shared.llm import complete, estimate_cost, select_tier, OPENROUTER_API_KEY
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("execution")
+logger = setup_logging("execution")
 
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 DB_PATH = os.getenv("DB_PATH", "/data/execution.db")

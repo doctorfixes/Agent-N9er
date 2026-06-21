@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("billing")
+logger = setup_logging("billing")
 
 DB_PATH = os.getenv("BILLING_DB_PATH", "/data/billing.db")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
@@ -319,6 +319,64 @@ async def revenue_summary():
         "total_token_cost_usd": round(total_token_cost, 2),
         "outstanding_usd": round(outstanding, 2),
         "profit_margin_pct": round((total_profit / total_revenue * 100) if total_revenue > 0 else 0, 1),
+    }
+
+
+@app.get("/funnel")
+async def conversion_funnel(days: int = 30):
+    """Conversion funnel: invoiced → sent → paid, with rates and revenue by platform."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM invoices WHERE created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        total = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM invoices WHERE status = 'sent' AND created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        sent = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM invoices WHERE status = 'paid' AND created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        paid = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM invoices WHERE status = 'failed' AND created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        failed = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            """SELECT platform, COUNT(*) as cnt,
+                      SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid_cnt,
+                      COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_usd ELSE 0 END), 0) as revenue
+               FROM invoices WHERE created_at >= datetime('now', ?)
+               GROUP BY platform ORDER BY revenue DESC""",
+            (f"-{days} days",),
+        )
+        platforms = []
+        for row in await cursor.fetchall():
+            platforms.append({
+                "platform": row[0],
+                "invoiced": row[1],
+                "paid": row[2],
+                "revenue_usd": round(row[3], 2),
+                "conversion_pct": round(row[2] / row[1] * 100, 1) if row[1] > 0 else 0,
+            })
+
+    return {
+        "period_days": days,
+        "invoiced": total,
+        "sent": sent,
+        "paid": paid,
+        "failed": failed,
+        "send_rate_pct": round(sent / total * 100, 1) if total > 0 else 0,
+        "payment_rate_pct": round(paid / total * 100, 1) if total > 0 else 0,
+        "by_platform": platforms,
     }
 
 

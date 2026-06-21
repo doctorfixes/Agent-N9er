@@ -17,6 +17,7 @@ services:
       - PROSPECTOR_URL=http://prospector:8900
       - EVALUATOR_URL=http://evaluator:8800
       - BILLING_URL=http://billing:9200
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - AUTO_SCAN_ENABLED=${AUTO_SCAN_ENABLED:-false}
       - SCAN_INTERVAL_SECONDS=${SCAN_INTERVAL_SECONDS:-3600}
@@ -68,6 +69,7 @@ services:
     ports:
       - "8100:8100"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
@@ -89,6 +91,7 @@ services:
     ports:
       - "8200:8200"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health')"]
@@ -110,6 +113,7 @@ services:
     ports:
       - "8300:8300"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - DB_PATH=/data/marketplace.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
@@ -134,6 +138,7 @@ services:
     ports:
       - "8400:8400"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - REPUTATION_URL=http://reputation-ledger:8500
       - DB_PATH=/data/execution.db
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -163,6 +168,7 @@ services:
     ports:
       - "8500:8500"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - DB_PATH=/data/reputation.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
@@ -187,6 +193,7 @@ services:
     ports:
       - "8600:8600"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - RECURRING_DB_PATH=/data/recurring.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
@@ -211,6 +218,7 @@ services:
     ports:
       - "8001:8001"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
@@ -267,6 +275,7 @@ services:
     ports:
       - "8800:8800"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - EVALUATOR_DB_PATH=/data/evaluator.db
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
@@ -293,6 +302,7 @@ services:
     ports:
       - "8900:8900"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - PROSPECTOR_DB_PATH=/data/prospector.db
       - EVALUATOR_URL=http://evaluator:8800
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -331,6 +341,7 @@ services:
     ports:
       - "9200:9200"
     environment:
+      - SENTRY_DSN=${SENTRY_DSN:-}
       - BILLING_DB_PATH=/data/billing.db
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}

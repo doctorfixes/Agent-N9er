@@ -23,9 +23,9 @@ from shared.config import (
     CORS_ORIGINS,
 )
 from shared.retry import retry_post
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("orchestrator")
+logger = setup_logging("orchestrator")
 
 NORMALIZATION_URL = os.getenv("NORMALIZATION_URL", "http://localhost:8100")
 RANKING_URL = os.getenv("RANKING_URL", "http://localhost:8200")
@@ -557,3 +557,21 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
         results["executed"], results["invoiced"], results["estimated_profit"],
     )
     return results
+
+
+@app.post("/backup")
+async def trigger_backup():
+    """Run database backup across all services."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "backup", os.path.join(os.path.dirname(__file__), "..", "scripts", "backup_databases.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        result = mod.backup_all()
+        logger.info("Backup completed: %s", result["timestamp"])
+        return result
+    except Exception as e:
+        logger.error("Backup failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")

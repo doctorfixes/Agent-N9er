@@ -183,6 +183,52 @@ class TestHealth:
         assert data["service"] == "billing"
 
 
+class TestConversionFunnel:
+    async def test_funnel_empty(self, client):
+        resp = await client.get("/funnel")
+        data = resp.json()
+        assert data["invoiced"] == 0
+        assert data["paid"] == 0
+        assert data["payment_rate_pct"] == 0
+        assert data["by_platform"] == []
+
+    async def test_funnel_with_data(self, client):
+        r1 = await client.post("/invoices", json=SAMPLE_INVOICE)
+        await client.patch(f"/invoices/{r1.json()['invoice_id']}", json={"status": "paid"})
+
+        r2 = await client.post("/invoices", json={**SAMPLE_INVOICE, "prospect_id": "p2"})
+        await client.patch(f"/invoices/{r2.json()['invoice_id']}", json={"status": "sent"})
+
+        await client.post("/invoices", json={
+            **SAMPLE_INVOICE, "prospect_id": "p3", "platform": "freelancer",
+        })
+
+        resp = await client.get("/funnel")
+        data = resp.json()
+        assert data["invoiced"] == 3
+        assert data["paid"] == 1
+        assert data["sent"] == 1
+        assert data["period_days"] == 30
+        assert len(data["by_platform"]) == 2
+
+    async def test_funnel_custom_days(self, client):
+        resp = await client.get("/funnel", params={"days": 7})
+        data = resp.json()
+        assert data["period_days"] == 7
+
+    async def test_funnel_platform_breakdown(self, client):
+        r1 = await client.post("/invoices", json=SAMPLE_INVOICE)
+        await client.patch(f"/invoices/{r1.json()['invoice_id']}", json={"status": "paid"})
+
+        resp = await client.get("/funnel")
+        platforms = resp.json()["by_platform"]
+        assert len(platforms) == 1
+        assert platforms[0]["platform"] == "upwork"
+        assert platforms[0]["paid"] == 1
+        assert platforms[0]["revenue_usd"] == 30.00
+        assert platforms[0]["conversion_pct"] == 100.0
+
+
 class TestStripeWebhook:
     async def test_webhook_disabled(self, client):
         resp = await client.post("/webhooks/stripe", content=b"{}", headers={"stripe-signature": ""})

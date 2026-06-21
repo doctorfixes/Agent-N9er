@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
 from shared.llm import estimate_cost, select_tier, MODEL_TIERS, MARKUP_MULTIPLIER
+from shared.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("evaluator")
+logger = setup_logging("evaluator")
 
 DB_PATH = os.getenv("EVALUATOR_DB_PATH", "/data/evaluator.db")
 MINIMUM_QUOTE_USD = float(os.getenv("MINIMUM_QUOTE_USD", "5.00"))
