@@ -96,6 +96,9 @@ app.add_middleware(
 )
 
 
+MAX_RETRIES = int(os.getenv("EXECUTION_MAX_RETRIES", "2"))
+
+
 @app.get("/health")
 async def health():
     try:
@@ -115,7 +118,7 @@ async def health():
 @app.post("/execute")
 async def execute(request: ExecuteRequest):
     if OPENROUTER_API_KEY and request.objective:
-        result = await _execute_live(request)
+        result = await _execute_with_retry(request)
     else:
         result = await _execute_simulation(request)
 
@@ -130,6 +133,22 @@ async def execute(request: ExecuteRequest):
         logger.warning("Failed to update reputation after retries: %s", e)
 
     return result
+
+
+async def _execute_with_retry(request: ExecuteRequest) -> dict:
+    last_result = None
+    for attempt in range(MAX_RETRIES + 1):
+        result = await _execute_live(request)
+        if result.get("success"):
+            if attempt > 0:
+                result["retries"] = attempt
+            return result
+        last_result = result
+        if attempt < MAX_RETRIES:
+            logger.warning("Execution failed for task %s, retry %d/%d",
+                          request.task_id, attempt + 1, MAX_RETRIES)
+    last_result["retries"] = MAX_RETRIES
+    return last_result
 
 
 async def _execute_live(request: ExecuteRequest) -> dict:
@@ -300,6 +319,66 @@ async def get_execution_output(task_id: str):
             "success": bool(row["success"]),
             "output": output,
         }
+
+
+@app.get("/analytics")
+async def analytics(days: int = Query(default=30, ge=1, le=365)):
+    async with _get_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN success THEN 1 ELSE 0 END) as successes, "
+            "AVG(duration) as avg_duration, SUM(cost_usd) as total_cost, "
+            "SUM(CASE WHEN mode='live' THEN 1 ELSE 0 END) as live_count, "
+            "SUM(CASE WHEN mode='simulation' THEN 1 ELSE 0 END) as sim_count "
+            "FROM executions WHERE executed_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        row = await cursor.fetchone()
+        total = row[0] or 0
+        successes = row[1] or 0
+
+        cursor2 = await db.execute(
+            "SELECT agent_id, COUNT(*) as tasks, SUM(CASE WHEN success THEN 1 ELSE 0 END) as wins, "
+            "AVG(duration) as avg_dur, SUM(cost_usd) as cost "
+            "FROM executions WHERE executed_at >= datetime('now', ?) "
+            "GROUP BY agent_id ORDER BY tasks DESC LIMIT 20",
+            (f"-{days} days",),
+        )
+        agents = []
+        for r in await cursor2.fetchall():
+            agents.append({
+                "agent_id": r[0], "tasks": r[1], "wins": r[2],
+                "success_rate": round(r[2] / r[1], 3) if r[1] else 0,
+                "avg_duration": round(r[3], 1) if r[3] else 0,
+                "total_cost": round(r[4], 4) if r[4] else 0,
+            })
+
+        cursor3 = await db.execute(
+            "SELECT model, COUNT(*) as uses, SUM(cost_usd) as cost, AVG(duration) as avg_dur "
+            "FROM executions WHERE executed_at >= datetime('now', ?) AND model != '' "
+            "GROUP BY model ORDER BY uses DESC",
+            (f"-{days} days",),
+        )
+        models = []
+        for r in await cursor3.fetchall():
+            models.append({
+                "model": r[0], "uses": r[1],
+                "total_cost": round(r[2], 4) if r[2] else 0,
+                "avg_duration": round(r[3], 1) if r[3] else 0,
+            })
+
+    return {
+        "period_days": days,
+        "total_executions": total,
+        "successes": successes,
+        "failures": total - successes,
+        "success_rate": round(successes / total, 3) if total else 0,
+        "avg_duration": round(row[2], 1) if row[2] else 0,
+        "total_cost_usd": round(row[3], 4) if row[3] else 0,
+        "live_executions": row[4] or 0,
+        "simulated_executions": row[5] or 0,
+        "by_agent": agents,
+        "by_model": models,
+    }
 
 
 @app.post("/proposal")

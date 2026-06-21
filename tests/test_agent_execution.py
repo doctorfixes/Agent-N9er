@@ -211,3 +211,23 @@ async def test_format_nonexistent_returns_404(client):
         "task_id": "nonexistent", "format": "markdown",
     })
     assert resp.status_code == 404
+
+
+# --- Analytics tests ---
+
+async def test_analytics_endpoint(client):
+    with _mock_reputation():
+        await client.post("/execute", json={"task_id": "an1", "agent_id": "a1", "confidence": 0.9})
+        await client.post("/execute", json={"task_id": "an2", "agent_id": "a2", "confidence": 0.8})
+    resp = await client.get("/analytics")
+    data = resp.json()
+    assert data["total_executions"] >= 2
+    assert "success_rate" in data
+    assert "by_agent" in data
+    assert isinstance(data["by_agent"], list)
+
+
+async def test_analytics_with_days_param(client):
+    resp = await client.get("/analytics", params={"days": 7})
+    data = resp.json()
+    assert data["period_days"] == 7

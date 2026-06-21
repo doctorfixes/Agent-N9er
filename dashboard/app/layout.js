@@ -17,6 +17,7 @@ export default function RootLayout({ children }) {
               <a href="/prospects" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Prospects</a>
               <a href="/revenue" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Revenue</a>
               <a href="/tasks" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Task History</a>
+              <a href="/analytics" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Analytics</a>
               <a href="/leaderboard" style={{ padding: "6px 14px", borderRadius: "6px", fontSize: "13px", fontWeight: 500, color: "#9ca3af", textDecoration: "none" }}>Leaderboard</a>
             </div>
           </div>

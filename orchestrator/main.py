@@ -42,6 +42,7 @@ DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
 SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,algora,topcoder").split(",")
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
+SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
 
 registered_agents = {}
 _agents_lock = asyncio.Lock()
@@ -146,7 +147,7 @@ async def _run_scan_cycle():
             except (httpx.RequestError, httpx.HTTPStatusError) as e:
                 results[platform] = {"error": str(e)}
                 logger.warning("Scan failed for %s: %s", platform, e)
-            await asyncio.sleep(2)
+            await asyncio.sleep(SCAN_RATE_DELAY)
 
     _scan_state["running"] = False
     _scan_state["last_scan_at"] = datetime.now(timezone.utc).isoformat()
