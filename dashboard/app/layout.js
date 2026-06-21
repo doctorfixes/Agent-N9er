@@ -1,3 +1,5 @@
+import LogoutButton from "./logout-button.js";
+
 export const metadata = {
   title: "Verixio Dashboard",
   description: "Agent marketplace monitoring",
@@ -7,12 +9,15 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body style={{ fontFamily: "system-ui, sans-serif", margin: 0, padding: "20px", background: "#f5f5f5" }}>
-        <nav style={{ marginBottom: "20px", padding: "10px 0", borderBottom: "2px solid #333" }}>
-          <strong style={{ fontSize: "1.3em" }}>Verixio</strong>
-          {" — "}
-          <a href="/">Home</a>{" | "}
-          <a href="/tasks">Tasks</a>{" | "}
-          <a href="/agents">Agents</a>
+        <nav style={{ marginBottom: "20px", padding: "10px 0", borderBottom: "2px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <strong style={{ fontSize: "1.3em" }}>Verixio</strong>
+            {" — "}
+            <a href="/">Home</a>{" | "}
+            <a href="/tasks">Tasks</a>{" | "}
+            <a href="/agents">Agents</a>
+          </div>
+          <LogoutButton />
         </nav>
         <main>{children}</main>
       </body>
