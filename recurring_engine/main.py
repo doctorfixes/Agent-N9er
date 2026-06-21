@@ -15,7 +15,7 @@ logger = logging.getLogger("recurring")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
-app = FastAPI(title="Verixio Recurring Engine")
+app = FastAPI(title="Agent N9er Recurring Engine")
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

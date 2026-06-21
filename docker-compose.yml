@@ -248,6 +248,7 @@ services:
       - REPUTATION_URL=http://reputation-ledger:8500
       - ORCHESTRATOR_URL=http://orchestrator:9000
       - SIMULATION_URL=http://simulation-engine:9100
+      - BROWSER_SERVICE_URL=http://browser-service:8001
     depends_on:
       orchestrator:
         condition: service_healthy

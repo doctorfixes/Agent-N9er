@@ -63,7 +63,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Verixio Agent Execution", lifespan=lifespan)
+app = FastAPI(title="Agent N9er Agent Execution", lifespan=lifespan)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(ServiceTokenMiddleware)

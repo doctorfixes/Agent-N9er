@@ -43,8 +43,8 @@ export default function HomePage() {
 
   return (
     <div>
-      <h1>Verixio Dashboard</h1>
-      <p>Multi-agent task marketplace with autonomous bidding and execution</p>
+      <h1>Agent N9er</h1>
+      <p>Watches every connected tool, drafts the work it finds, and dispatches autonomous agents to clear it — end to end.</p>
 
       <div style={{ background: "white", padding: "20px", borderRadius: "8px", marginBottom: "20px" }}>
         <h2>Submit Task</h2>
