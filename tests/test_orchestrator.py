@@ -146,3 +146,43 @@ async def test_register_agent_uses_defaults(client):
     data = orch.registered_agents["def1"]
     assert data["profile"] == "unknown"
     assert data["confidence"] == 0.5
+
+
+# --- Scan scheduler tests ---
+
+async def test_scan_status_endpoint(client):
+    resp = await client.get("/scan/status")
+    data = resp.json()
+    assert "auto_scan_enabled" in data
+    assert "platforms" in data
+    assert "total_scans" in data
+    assert data["running"] is False
+
+
+async def test_trigger_scan_calls_prospector(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 3, "new": 2, "platform": "upwork"})
+
+    async def mock_post(url, **kwargs):
+        return scan_resp
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/scan/trigger")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "results" in data
+    assert data["scan_state"]["total_scans"] >= 1
+
+
+async def test_trigger_scan_while_running(client):
+    orch._scan_state["running"] = True
+    try:
+        resp = await client.post("/scan/trigger")
+        assert resp.json()["ok"] == 0
+    finally:
+        orch._scan_state["running"] = False

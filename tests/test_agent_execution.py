@@ -122,3 +122,92 @@ async def test_get_execution_output(client):
 async def test_get_missing_execution_output(client):
     resp = await client.get("/executions/nonexistent/output")
     assert resp.status_code == 404
+
+
+# --- Proposal generation tests ---
+
+async def test_proposal_simulation_mode(client):
+    resp = await client.post("/proposal", json={
+        "title": "Build a React Dashboard",
+        "description": "Need a React developer",
+        "platform": "upwork",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["mode"] == "simulation"
+    assert len(data["proposal"]) > 0
+
+
+async def test_proposal_with_all_fields(client):
+    resp = await client.post("/proposal", json={
+        "prospect_id": "p123",
+        "title": "Fix Python Script",
+        "description": "Small fix needed in data pipeline",
+        "platform": "github_bounties",
+        "budget_max": 500,
+        "skills": "python,pandas",
+        "tone": "technical",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["prospect_id"] == "p123"
+
+
+async def test_proposal_missing_title_returns_422(client):
+    resp = await client.post("/proposal", json={"description": "no title"})
+    assert resp.status_code == 422
+
+
+# --- Deliverable formatting tests ---
+
+async def test_format_deliverable_no_output(client):
+    with _mock_reputation():
+        await client.post("/execute", json={
+            "task_id": "fmt1", "agent_id": "a1", "confidence": 0.9,
+        })
+    resp = await client.post("/format-deliverable", json={
+        "task_id": "fmt1", "format": "markdown",
+    })
+    data = resp.json()
+    assert data["ok"] == 0
+
+
+async def test_format_deliverable_with_output(client):
+    import aiosqlite
+    async with aiosqlite.connect(execution.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO executions (task_id, agent_id, success, duration, executed_at, mode, model, cost_usd, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("fmt_live", "a1", True, 2.5, "2025-01-01T00:00:00", "live", "test-model", 0.01, "Here is the deliverable content."),
+        )
+        await db.commit()
+    resp = await client.post("/format-deliverable", json={
+        "task_id": "fmt_live", "format": "markdown",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["task_id"] == "fmt_live"
+    assert "word_count" in data
+    assert "Deliverable" in data["content"]
+
+
+async def test_format_deliverable_html(client):
+    import aiosqlite
+    async with aiosqlite.connect(execution.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO executions (task_id, agent_id, success, duration, executed_at, mode, model, cost_usd, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("fmt_html", "a1", True, 1.0, "2025-01-01T00:00:00", "live", "test-model", 0.005, "HTML output test"),
+        )
+        await db.commit()
+    resp = await client.post("/format-deliverable", json={
+        "task_id": "fmt_html", "format": "html",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "<div" in data["content"]
+
+
+async def test_format_nonexistent_returns_404(client):
+    resp = await client.post("/format-deliverable", json={
+        "task_id": "nonexistent", "format": "markdown",
+    })
+    assert resp.status_code == 404

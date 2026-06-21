@@ -35,6 +35,16 @@ class ExecuteRequest(BaseModel):
     tier: str = ""
 
 
+class ProposalRequest(BaseModel):
+    prospect_id: str = ""
+    title: str
+    description: str = ""
+    platform: str = "unknown"
+    budget_max: float = 0
+    skills: str = ""
+    tone: str = "professional"
+
+
 @asynccontextmanager
 async def _get_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -290,3 +300,163 @@ async def get_execution_output(task_id: str):
             "success": bool(row["success"]),
             "output": output,
         }
+
+
+@app.post("/proposal")
+async def generate_proposal(req: ProposalRequest):
+    if not OPENROUTER_API_KEY:
+        return _simulated_proposal(req)
+
+    tone_map = {
+        "professional": "formal and professional, emphasizing reliability and expertise",
+        "friendly": "warm and approachable, showing genuine interest",
+        "technical": "technically detailed, demonstrating deep domain knowledge",
+        "concise": "brief and direct, focusing only on key qualifications",
+    }
+    tone_desc = tone_map.get(req.tone, tone_map["professional"])
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Agent N9er, an AI-powered freelance agent. Write a compelling "
+                f"proposal/cover letter that is {tone_desc}. "
+                "Include: 1) A hook addressing the client's need, "
+                "2) Relevant capabilities and approach, "
+                "3) Estimated timeline, "
+                "4) A clear call to action. "
+                "Keep it under 300 words. Do NOT include pricing — that's handled separately."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Platform: {req.platform}\n"
+                f"Job Title: {req.title}\n"
+                f"Description: {req.description}\n"
+                f"Required Skills: {req.skills}\n"
+                f"Client Budget: ${req.budget_max}" if req.budget_max else
+                f"Platform: {req.platform}\n"
+                f"Job Title: {req.title}\n"
+                f"Description: {req.description}\n"
+                f"Required Skills: {req.skills}"
+            ),
+        },
+    ]
+
+    try:
+        result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        return {
+            "ok": 1,
+            "prospect_id": req.prospect_id,
+            "proposal": result.content,
+            "mode": "live",
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "tokens": result.input_tokens + result.output_tokens,
+        }
+    except Exception as e:
+        logger.error("Proposal generation failed: %s", e)
+        return _simulated_proposal(req)
+
+
+def _simulated_proposal(req: ProposalRequest) -> dict:
+    proposal = (
+        f"Thank you for posting \"{req.title}\". "
+        "I have extensive experience with the skills required for this project "
+        "and am confident I can deliver high-quality results. "
+        "My approach would be to first thoroughly analyze the requirements, "
+        "then implement a clean, well-tested solution. "
+        "I typically deliver projects like this within 3-5 business days. "
+        "I'd love to discuss the details further."
+    )
+    return {
+        "ok": 1,
+        "prospect_id": req.prospect_id,
+        "proposal": proposal,
+        "mode": "simulation",
+        "model": "none",
+        "cost_usd": 0,
+        "tokens": 0,
+    }
+
+
+@app.post("/format-deliverable")
+async def format_deliverable(payload: dict):
+    task_id = payload.get("task_id", "")
+    format_type = payload.get("format", "markdown")
+
+    async with _get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM executions WHERE task_id = ? ORDER BY executed_at DESC LIMIT 1",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Execution not found")
+
+        try:
+            raw_output = row["output"] or ""
+        except (IndexError, KeyError):
+            raw_output = ""
+
+    if not raw_output:
+        return {"ok": 0, "detail": "No output to format"}
+
+    if format_type == "markdown":
+        formatted = _format_markdown(raw_output, task_id, row)
+    elif format_type == "html":
+        formatted = _format_html(raw_output, task_id, row)
+    elif format_type == "plain":
+        formatted = raw_output
+    else:
+        formatted = _format_markdown(raw_output, task_id, row)
+
+    return {
+        "ok": 1,
+        "task_id": task_id,
+        "format": format_type,
+        "content": formatted,
+        "word_count": len(formatted.split()),
+    }
+
+
+def _format_markdown(output: str, task_id: str, row) -> str:
+    try:
+        model = row["model"] or "unknown"
+        cost = row["cost_usd"] or 0
+    except (IndexError, KeyError):
+        model = "unknown"
+        cost = 0
+
+    header = (
+        f"# Deliverable: {task_id}\n\n"
+        f"**Agent:** {row['agent_id']}  \n"
+        f"**Model:** {model}  \n"
+        f"**Generated:** {row['executed_at']}  \n"
+        f"**Cost:** ${cost:.4f}  \n\n"
+        "---\n\n"
+    )
+    return header + output
+
+
+def _format_html(output: str, task_id: str, row) -> str:
+    try:
+        model = row["model"] or "unknown"
+        cost = row["cost_usd"] or 0
+    except (IndexError, KeyError):
+        model = "unknown"
+        cost = 0
+
+    lines = output.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        f"<div class='deliverable'>"
+        f"<h1>Deliverable: {task_id}</h1>"
+        f"<div class='meta'>"
+        f"<span>Agent: {row['agent_id']}</span> | "
+        f"<span>Model: {model}</span> | "
+        f"<span>Cost: ${cost:.4f}</span>"
+        f"</div><hr/>"
+        f"<div class='content'><pre>{lines}</pre></div>"
+        f"</div>"
+    )

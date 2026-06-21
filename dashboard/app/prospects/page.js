@@ -40,14 +40,91 @@ function Card({ title, value, subtitle }) {
   );
 }
 
+function ProposalModal({ prospect, onClose }) {
+  const [proposal, setProposal] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [tone, setTone] = useState("professional");
+
+  const generate = async () => {
+    setLoading(true);
+    try {
+      const resp = await fetch("/api/proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prospect_id: prospect.id,
+          title: prospect.title,
+          description: prospect.description || "",
+          platform: prospect.platform,
+          budget_max: prospect.budget_max || 0,
+          skills: prospect.skills || "",
+          tone,
+        }),
+      });
+      setProposal(await resp.json());
+    } catch (e) {
+      setProposal({ error: e.message });
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+      <div style={{ background: "white", borderRadius: 12, padding: 24, maxWidth: 600, width: "90%", maxHeight: "80vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Generate Proposal</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280" }}>x</button>
+        </div>
+        <div style={{ marginBottom: 12, fontSize: 14, color: "#374151" }}>
+          <strong>{prospect.title}</strong>
+          <div style={{ color: "#6b7280", fontSize: 12 }}>{prospect.platform} {prospect.budget_max > 0 && `| Budget: $${prospect.budget_max}`}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          {["professional", "friendly", "technical", "concise"].map((t) => (
+            <button key={t} onClick={() => setTone(t)} style={{
+              padding: "4px 12px", borderRadius: 6, border: "1px solid #e5e7eb",
+              background: tone === t ? "#111827" : "white",
+              color: tone === t ? "white" : "#374151",
+              fontSize: 12, cursor: "pointer",
+            }}>{t}</button>
+          ))}
+        </div>
+        <button onClick={generate} disabled={loading} style={{
+          padding: "8px 20px", background: "#2563eb", color: "white", border: "none",
+          borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 500, marginBottom: 16,
+        }}>
+          {loading ? "Generating..." : "Generate Proposal"}
+        </button>
+        {proposal && !proposal.error && (
+          <div>
+            <div style={{ background: "#f9fafb", padding: 16, borderRadius: 8, border: "1px solid #e5e7eb", whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.6 }}>
+              {proposal.proposal}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 11, color: "#9ca3af" }}>
+              Mode: {proposal.mode} | Cost: ${proposal.cost_usd?.toFixed(4) || "0"} | Tokens: {proposal.tokens || 0}
+            </div>
+          </div>
+        )}
+        {proposal?.error && (
+          <div style={{ padding: 12, background: "#fef2f2", borderRadius: 8, color: "#dc2626", fontSize: 13 }}>
+            Error: {proposal.error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ProspectsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
+  const [proposalTarget, setProposalTarget] = useState(null);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
   const { data: platforms } = useSWR("/api/prospects/platforms", fetcher);
+  const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
 
   const handleScan = async (platform) => {
     setScanning(true);
@@ -60,6 +137,20 @@ export default function ProspectsPage() {
       });
       const data = await resp.json();
       setScanResult(data);
+      mutate();
+    } catch (e) {
+      setScanResult({ error: e.message });
+    }
+    setScanning(false);
+  };
+
+  const handleFullScan = async () => {
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const resp = await fetch("/api/scan", { method: "POST" });
+      const data = await resp.json();
+      setScanResult({ discovered: Object.values(data.results || {}).reduce((s, r) => s + (r.discovered || 0), 0), new: Object.values(data.results || {}).reduce((s, r) => s + (r.new || 0), 0), full: true });
       mutate();
     } catch (e) {
       setScanResult({ error: e.message });
@@ -91,14 +182,28 @@ export default function ProspectsPage() {
           >
             {scanning ? "Scanning..." : "Scan"}
           </button>
+          <button
+            onClick={handleFullScan}
+            disabled={scanning}
+            style={{ padding: "8px 16px", background: "#2563eb", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13, fontWeight: 500 }}
+          >
+            {scanning ? "..." : "Full Scan"}
+          </button>
         </div>
       </div>
+
+      {scanState && (
+        <div style={{ padding: "8px 16px", marginBottom: 12, borderRadius: 8, background: "#f0f9ff", border: "1px solid #bae6fd", fontSize: 12, color: "#0369a1", display: "flex", justifyContent: "space-between" }}>
+          <span>Auto-scan: {scanState.auto_scan_enabled ? "ON" : "OFF"} | Total scans: {scanState.total_scans} | Total discovered: {scanState.total_discovered}</span>
+          {scanState.last_scan_at && <span>Last scan: {new Date(scanState.last_scan_at).toLocaleString()}</span>}
+        </div>
+      )}
 
       {scanResult && (
         <div style={{ padding: "12px 16px", marginBottom: 16, borderRadius: 8, background: scanResult.error ? "#fef2f2" : "#f0fdf4", border: `1px solid ${scanResult.error ? "#fecaca" : "#bbf7d0"}` }}>
           {scanResult.error
             ? `Scan failed: ${scanResult.error}`
-            : `Found ${scanResult.discovered} jobs, ${scanResult.new} new prospects`}
+            : `Found ${scanResult.discovered} jobs, ${scanResult.new} new prospects${scanResult.full ? " (full scan)" : ""}`}
         </div>
       )}
 
@@ -138,6 +243,7 @@ export default function ProspectsPage() {
               <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#6b7280" }}>Budget</th>
               <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#6b7280" }}>Status</th>
               <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#6b7280" }}>Discovered</th>
+              <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#6b7280" }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -150,17 +256,29 @@ export default function ProspectsPage() {
                 </td>
                 <td style={{ padding: "10px 16px" }}><Badge status={p.status} /></td>
                 <td style={{ padding: "10px 16px", color: "#9ca3af", fontSize: 12 }}>{p.discovered_at ? new Date(p.discovered_at).toLocaleDateString() : "-"}</td>
+                <td style={{ padding: "10px 16px" }}>
+                  <button
+                    onClick={() => setProposalTarget(p)}
+                    style={{ padding: "3px 10px", background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 11, cursor: "pointer", color: "#374151" }}
+                  >
+                    Propose
+                  </button>
+                </td>
               </tr>
             )) : (
               <tr>
-                <td colSpan={5} style={{ padding: "40px 16px", textAlign: "center", color: "#9ca3af" }}>
-                  No prospects yet. Click "Scan Upwork" to discover jobs.
+                <td colSpan={6} style={{ padding: "40px 16px", textAlign: "center", color: "#9ca3af" }}>
+                  No prospects yet. Click "Scan" to discover jobs.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+
+      {proposalTarget && (
+        <ProposalModal prospect={proposalTarget} onClose={() => setProposalTarget(null)} />
+      )}
     </div>
   );
 }

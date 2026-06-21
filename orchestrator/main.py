@@ -3,6 +3,7 @@ import sys
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,8 +39,20 @@ BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
+SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,algora,topcoder").split(",")
+AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
+
 registered_agents = {}
 _agents_lock = asyncio.Lock()
+_scan_task: asyncio.Task | None = None
+_scan_state = {
+    "running": False,
+    "last_scan_at": None,
+    "total_scans": 0,
+    "total_discovered": 0,
+    "last_results": {},
+}
 
 
 class AgentRegisterRequest(BaseModel):
@@ -100,11 +113,66 @@ async def _persist_agent(agent_data: dict):
         await db.commit()
 
 
+async def _scan_loop():
+    while True:
+        try:
+            await asyncio.sleep(SCAN_INTERVAL)
+            await _run_scan_cycle()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Scan loop error: %s", e)
+            await asyncio.sleep(60)
+
+
+async def _run_scan_cycle():
+    _scan_state["running"] = True
+    svc = _svc_headers()
+    results = {}
+    total_new = 0
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        for platform in SCAN_PLATFORMS:
+            try:
+                resp = await client.post(
+                    f"{PROSPECTOR_URL}/scan",
+                    json={"platform": platform, "max_results": 20},
+                    headers=svc,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                results[platform] = {"discovered": data.get("discovered", 0), "new": data.get("new", 0)}
+                total_new += data.get("new", 0)
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                results[platform] = {"error": str(e)}
+                logger.warning("Scan failed for %s: %s", platform, e)
+            await asyncio.sleep(2)
+
+    _scan_state["running"] = False
+    _scan_state["last_scan_at"] = datetime.now(timezone.utc).isoformat()
+    _scan_state["total_scans"] += 1
+    _scan_state["total_discovered"] += total_new
+    _scan_state["last_results"] = results
+
+    logger.info("Scan cycle complete: %d platforms, %d new prospects", len(SCAN_PLATFORMS), total_new)
+    return results
+
+
 @asynccontextmanager
 async def lifespan(app):
+    global _scan_task
     await _init_db()
     await _load_agents()
+    if AUTO_SCAN_ENABLED:
+        _scan_task = asyncio.create_task(_scan_loop())
+        logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
     yield
+    if _scan_task:
+        _scan_task.cancel()
+        try:
+            await _scan_task
+        except asyncio.CancelledError:
+            pass
 
 
 def _svc_headers(request=None):
@@ -169,6 +237,24 @@ async def list_agents():
 @app.get("/task-categories")
 async def task_categories(tier: str = None):
     return list_categories(tier)
+
+
+@app.get("/scan/status")
+async def scan_status():
+    return {
+        "auto_scan_enabled": AUTO_SCAN_ENABLED,
+        "scan_interval_seconds": SCAN_INTERVAL,
+        "platforms": SCAN_PLATFORMS,
+        **_scan_state,
+    }
+
+
+@app.post("/scan/trigger")
+async def trigger_scan():
+    if _scan_state["running"]:
+        return {"ok": 0, "detail": "Scan already in progress"}
+    results = await _run_scan_cycle()
+    return {"ok": 1, "results": results, "scan_state": _scan_state}
 
 
 @app.post("/pipeline")
