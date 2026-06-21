@@ -12,6 +12,20 @@
 
 # Backend service URLs — set these in Netlify UI (Site > Environment variables)
 # ORCHESTRATOR_URL = https://orchestrator-production.up.railway.app
+# NORMALIZATION_URL = https://normalization-production.up.railway.app
+# RANKING_URL = https://ranking-production.up.railway.app
 # MARKETPLACE_URL = https://marketplace-production.up.railway.app
-# REPUTATION_URL  = https://reputation-production.up.railway.app
-# SIMULATION_URL  = https://simulation-production.up.railway.app
+# EXECUTION_URL = https://execution-production.up.railway.app
+# REPUTATION_URL = https://reputation-production.up.railway.app
+# RECURRING_URL = https://recurring-production.up.railway.app
+# JWT_SECRET = <generate a random 256-bit secret>
+# ADMIN_USER = admin
+# ADMIN_PASS = <strong password>
+# SERVICE_TOKEN = <shared token for inter-service auth>
+
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Methods = "GET, POST, OPTIONS"
+    Access-Control-Allow-Headers = "Content-Type, Authorization"
