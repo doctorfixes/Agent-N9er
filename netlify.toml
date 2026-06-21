@@ -7,9 +7,6 @@
   NODE_VERSION = "22"
   NEXT_TELEMETRY_DISABLED = "1"
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
-
 # Backend service URLs — set these in Netlify UI (Site > Environment variables)
 # ORCHESTRATOR_URL = https://orchestrator-production.up.railway.app
 # NORMALIZATION_URL = https://normalization-production.up.railway.app
