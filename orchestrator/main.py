@@ -32,6 +32,9 @@ MARKETPLACE_URL = os.getenv("MARKETPLACE_URL", "http://localhost:8300")
 EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 RECURRING_URL = os.getenv("RECURRING_URL", "http://localhost:8600")
+PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
+EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
+BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
@@ -301,3 +304,157 @@ async def process_recurring():
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Recurring engine unreachable: {e}")
+
+
+class RevenuePipelineRequest(BaseModel):
+    platform: str = "upwork"
+    query: str = ""
+    category: str = ""
+    max_results: int = 10
+    auto_execute: bool = True
+    client_email: str = ""
+
+
+@app.post("/revenue-pipeline")
+async def revenue_pipeline(req: RevenuePipelineRequest):
+    """End-to-end: scan → evaluate → execute → invoice."""
+    svc = _svc_headers()
+    results = {
+        "platform": req.platform,
+        "scanned": 0,
+        "evaluated": 0,
+        "approved": 0,
+        "executed": 0,
+        "invoiced": 0,
+        "total_quoted": 0,
+        "total_cost": 0,
+        "prospects": [],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            # 1. Scan for prospects
+            scan_resp = await client.post(
+                f"{PROSPECTOR_URL}/scan",
+                json={"platform": req.platform, "query": req.query,
+                      "category": req.category, "max_results": req.max_results},
+                headers=svc,
+            )
+            scan_resp.raise_for_status()
+            scan_data = scan_resp.json()
+            results["scanned"] = scan_data.get("discovered", 0)
+
+            # 2. Fetch new prospects and evaluate each
+            prospects_resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "discovered", "platform": req.platform, "limit": req.max_results},
+                headers=svc,
+            )
+            prospects_resp.raise_for_status()
+            prospects = prospects_resp.json()
+
+            for prospect in prospects:
+                pid = prospect["id"]
+                prospect_result = {"id": pid, "title": prospect["title"], "status": "discovered"}
+
+                # Evaluate
+                try:
+                    eval_resp = await client.post(
+                        f"{PROSPECTOR_URL}/prospects/{pid}/evaluate",
+                        headers=svc,
+                    )
+                    eval_resp.raise_for_status()
+                    eval_data = eval_resp.json()
+                    results["evaluated"] += 1
+
+                    if eval_data.get("status") != "approved":
+                        prospect_result["status"] = "rejected"
+                        prospect_result["reason"] = eval_data.get("evaluation", {}).get("rejection_reason", "")
+                        results["prospects"].append(prospect_result)
+                        continue
+
+                    results["approved"] += 1
+                    evaluation = eval_data.get("evaluation", {})
+                    quoted = evaluation.get("quoted_price_usd", 0)
+                    cost = evaluation.get("estimated_cost_usd", 0)
+                    results["total_quoted"] += quoted
+                    results["total_cost"] += cost
+                    prospect_result["quoted_price"] = quoted
+                    prospect_result["estimated_cost"] = cost
+                    prospect_result["complexity"] = evaluation.get("complexity", "")
+
+                    # 3. Execute if auto_execute
+                    if req.auto_execute:
+                        exec_resp = await client.post(
+                            f"{EXECUTION_URL}/execute",
+                            json={
+                                "task_id": pid,
+                                "agent_id": "agent-n9er-primary",
+                                "confidence": 0.85,
+                                "objective": prospect["title"],
+                                "description": prospect.get("description", ""),
+                                "complexity": evaluation.get("complexity", "moderate"),
+                                "tier": evaluation.get("recommended_tier", ""),
+                            },
+                            headers=svc,
+                        )
+                        exec_resp.raise_for_status()
+                        exec_data = exec_resp.json()
+
+                        if exec_data.get("success"):
+                            results["executed"] += 1
+                            prospect_result["status"] = "executed"
+                            prospect_result["execution"] = {
+                                "mode": exec_data.get("mode"),
+                                "cost_usd": exec_data.get("cost_usd", 0),
+                                "duration": exec_data.get("duration"),
+                            }
+
+                            # Update prospect status
+                            await client.patch(
+                                f"{PROSPECTOR_URL}/prospects/{pid}",
+                                json={"status": "delivered"},
+                                headers=svc,
+                            )
+
+                            # 4. Create invoice
+                            if req.client_email or prospect.get("client_email"):
+                                inv_resp = await client.post(
+                                    f"{BILLING_URL}/invoices",
+                                    json={
+                                        "prospect_id": pid,
+                                        "client_email": req.client_email or prospect.get("client_email", ""),
+                                        "description": prospect["title"],
+                                        "amount_usd": quoted,
+                                        "token_cost_usd": exec_data.get("cost_usd", cost),
+                                        "platform": req.platform,
+                                    },
+                                    headers=svc,
+                                )
+                                if inv_resp.status_code == 200:
+                                    results["invoiced"] += 1
+                                    prospect_result["invoice_id"] = inv_resp.json().get("invoice_id")
+                        else:
+                            prospect_result["status"] = "execution_failed"
+                    else:
+                        prospect_result["status"] = "approved"
+
+                except httpx.RequestError as e:
+                    prospect_result["status"] = "error"
+                    prospect_result["error"] = str(e)
+
+                results["prospects"].append(prospect_result)
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Pipeline service unreachable: {e}")
+
+    results["total_quoted"] = round(results["total_quoted"], 2)
+    results["total_cost"] = round(results["total_cost"], 4)
+    results["estimated_profit"] = round(results["total_quoted"] - results["total_cost"], 2)
+
+    logger.info(
+        "Revenue pipeline: scanned=%d evaluated=%d approved=%d executed=%d invoiced=%d profit=$%.2f",
+        results["scanned"], results["evaluated"], results["approved"],
+        results["executed"], results["invoiced"], results["estimated_profit"],
+    )
+    return results

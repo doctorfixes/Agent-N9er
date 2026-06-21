@@ -14,6 +14,10 @@ services:
       - EXECUTION_URL=http://agent-execution:8400
       - REPUTATION_URL=http://reputation-ledger:8500
       - RECURRING_URL=http://recurring-engine:8600
+      - PROSPECTOR_URL=http://prospector:8900
+      - EVALUATOR_URL=http://evaluator:8800
+      - BILLING_URL=http://billing:9200
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000
@@ -31,6 +35,12 @@ services:
       agent-execution:
         condition: service_healthy
       reputation-ledger:
+        condition: service_healthy
+      evaluator:
+        condition: service_healthy
+      prospector:
+        condition: service_healthy
+      billing:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
@@ -123,6 +133,7 @@ services:
     environment:
       - REPUTATION_URL=http://reputation-ledger:8500
       - DB_PATH=/data/execution.db
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
       - execution-data:/data

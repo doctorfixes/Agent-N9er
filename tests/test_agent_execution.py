@@ -83,3 +83,42 @@ async def test_history_pagination(client):
     assert len(history) == 2
     history2 = (await client.get("/history", params={"limit": 2, "offset": 2})).json()
     assert len(history2) == 2
+
+
+# --- Simulation vs live mode tests ---
+
+async def test_simulation_mode_when_no_api_key(client):
+    with _mock_reputation():
+        resp = await client.post("/execute", json={"task_id": "sim1", "agent_id": "a1", "confidence": 0.9})
+    data = resp.json()
+    assert data["mode"] == "simulation"
+
+
+async def test_health_shows_mode(client):
+    resp = await client.get("/health")
+    data = resp.json()
+    assert data["mode"] in ("live", "simulation")
+
+
+async def test_execution_with_objective_but_no_key(client):
+    with _mock_reputation():
+        resp = await client.post("/execute", json={
+            "task_id": "obj1", "agent_id": "a1", "confidence": 0.9,
+            "objective": "Write a hello world in Python",
+        })
+    data = resp.json()
+    assert data["mode"] == "simulation"
+
+
+async def test_get_execution_output(client):
+    with _mock_reputation():
+        await client.post("/execute", json={"task_id": "out1", "agent_id": "a1", "confidence": 0.9})
+    resp = await client.get("/executions/out1/output")
+    data = resp.json()
+    assert data["task_id"] == "out1"
+    assert "success" in data
+
+
+async def test_get_missing_execution_output(client):
+    resp = await client.get("/executions/nonexistent/output")
+    assert resp.status_code == 404
