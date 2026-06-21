@@ -5,7 +5,7 @@ from httpx import ASGITransport, AsyncClient
 import pytest
 
 _tmpdir = tempfile.mkdtemp()
-os.environ["DB_PATH"] = os.path.join(_tmpdir, "test_reputation.db")
+os.environ["REPUTATION_DB_PATH"] = os.path.join(_tmpdir, "test_reputation.db")
 
 from conftest import load_service
 

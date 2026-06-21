@@ -69,11 +69,14 @@ class PipelineRequest(BaseModel):
     objective: str = ""
     source: str = "manual"
     inputs: dict = {}
+    mode: str = "production"
 
 
 async def _init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agents (
                 agent_id TEXT PRIMARY KEY,
@@ -370,6 +373,7 @@ async def full_pipeline(task: PipelineRequest):
                 "task_id": task_id,
                 "agent_id": winner["agent_id"],
                 "confidence": winner.get("confidence", 0.5),
+                "mode": task.mode,
             }, headers=svc)
             exec_data = exec_resp.json()
 
@@ -414,6 +418,7 @@ async def process_recurring():
                     objective=task.get("objective", ""),
                     source=task.get("source", "recurring"),
                     inputs=task.get("inputs", {}),
+                    mode="production",
                 )
                 result = await full_pipeline(pipeline_req)
                 results.append(result)

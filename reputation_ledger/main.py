@@ -15,7 +15,7 @@ from shared.logging_config import setup_logging
 
 logger = setup_logging("reputation")
 
-DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
+DB_PATH = os.getenv("REPUTATION_DB_PATH", "/data/reputation.db")
 
 
 class RegisterRequest(BaseModel):
@@ -27,6 +27,7 @@ class RegisterRequest(BaseModel):
 class UpdateRequest(BaseModel):
     agent_id: str
     success: bool
+    mode: str = "production"
 
 
 class RatingRequest(BaseModel):
@@ -51,6 +52,8 @@ async def _get_db():
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agents (
                 agent_id TEXT PRIMARY KEY,
@@ -144,6 +147,11 @@ async def set_nickname(agent_id: str, req: NicknameRequest):
 
 @app.post("/update")
 async def update(record: UpdateRequest):
+    if record.mode == "simulation":
+        logger.info("Agent %s reputation update skipped (simulation mode, success=%s)",
+                     record.agent_id, record.success)
+        return {"ok": 1, "agent_id": record.agent_id, "reputation": {"simulated": True}}
+
     async with _get_db() as db:
         cursor = await db.execute("SELECT * FROM agents WHERE agent_id = ?", (record.agent_id,))
         row = await cursor.fetchone()

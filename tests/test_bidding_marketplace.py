@@ -6,7 +6,7 @@ import pytest
 
 # Point DB at a temp file before importing the module
 _tmpdir = tempfile.mkdtemp()
-os.environ["DB_PATH"] = os.path.join(_tmpdir, "test_marketplace.db")
+os.environ["MARKETPLACE_DB_PATH"] = os.path.join(_tmpdir, "test_marketplace.db")
 
 from conftest import load_service
 

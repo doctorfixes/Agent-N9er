@@ -14,7 +14,7 @@ norm = load_service("val_norm", "normalization_service")
 ranking = load_service("val_ranking", "ranking_engine")
 
 _mp_db = os.path.join(_tmpdir, "test_val_marketplace.db")
-os.environ["DB_PATH"] = _mp_db
+os.environ["MARKETPLACE_DB_PATH"] = _mp_db
 marketplace = load_service("val_marketplace", "bidding_marketplace")
 marketplace.DB_PATH = _mp_db
 

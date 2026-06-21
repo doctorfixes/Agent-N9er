@@ -114,7 +114,7 @@ services:
       - "8300:8300"
     environment:
       - SENTRY_DSN=${SENTRY_DSN:-}
-      - DB_PATH=/data/marketplace.db
+      - MARKETPLACE_DB_PATH=/data/marketplace.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
       - marketplace-data:/data
@@ -140,7 +140,7 @@ services:
     environment:
       - SENTRY_DSN=${SENTRY_DSN:-}
       - REPUTATION_URL=http://reputation-ledger:8500
-      - DB_PATH=/data/execution.db
+      - EXECUTION_DB_PATH=/data/execution.db
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
@@ -169,7 +169,7 @@ services:
       - "8500:8500"
     environment:
       - SENTRY_DSN=${SENTRY_DSN:-}
-      - DB_PATH=/data/reputation.db
+      - REPUTATION_DB_PATH=/data/reputation.db
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
       - reputation-data:/data

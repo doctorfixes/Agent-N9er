@@ -17,7 +17,7 @@ from shared.logging_config import setup_logging
 
 logger = setup_logging("marketplace")
 
-DB_PATH = os.getenv("DB_PATH", "/data/marketplace.db")
+DB_PATH = os.getenv("MARKETPLACE_DB_PATH", "/data/marketplace.db")
 
 
 class PublishRequest(BaseModel):
@@ -50,6 +50,8 @@ async def _get_db():
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,

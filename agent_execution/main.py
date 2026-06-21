@@ -23,7 +23,7 @@ from shared.logging_config import setup_logging
 logger = setup_logging("execution")
 
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
-DB_PATH = os.getenv("DB_PATH", "/data/execution.db")
+DB_PATH = os.getenv("EXECUTION_DB_PATH", "/data/execution.db")
 
 
 class ExecuteRequest(BaseModel):
@@ -34,6 +34,7 @@ class ExecuteRequest(BaseModel):
     description: str = ""
     complexity: str = "moderate"
     tier: str = ""
+    mode: str = "production"
 
 
 class ProposalRequest(BaseModel):
@@ -56,6 +57,8 @@ async def _get_db():
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS executions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,15 +126,16 @@ async def execute(request: ExecuteRequest):
     else:
         result = await _execute_simulation(request)
 
-    svc = get_service_headers()
-    try:
-        await retry_request(
-            "POST", f"{REPUTATION_URL}/update",
-            timeout=QUICK_TIMEOUT, headers=svc,
-            json={"agent_id": request.agent_id, "success": result["success"]},
-        )
-    except httpx.RequestError as e:
-        logger.warning("Failed to update reputation after retries: %s", e)
+    if request.mode != "simulation":
+        svc = get_service_headers()
+        try:
+            await retry_request(
+                "POST", f"{REPUTATION_URL}/update",
+                timeout=QUICK_TIMEOUT, headers=svc,
+                json={"agent_id": request.agent_id, "success": result["success"]},
+            )
+        except httpx.RequestError as e:
+            logger.warning("Failed to update reputation after retries: %s", e)
 
     return result
 

@@ -9,6 +9,13 @@ logger = logging.getLogger("database")
 DB_BACKEND = os.getenv("DB_BACKEND", "sqlite")
 
 
+async def enable_wal(db_path: str):
+    """Enable WAL mode and set busy timeout for SQLite database."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+
+
 def _parse_dsn(dsn: str) -> dict:
     """Extract host, port, dbname, user, password from a PostgreSQL DSN."""
     from urllib.parse import urlparse
@@ -29,6 +36,8 @@ class SQLiteDB:
     async def init(self, schema_sql: list[str]):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
             for stmt in schema_sql:
                 await db.execute(stmt)
             await db.commit()

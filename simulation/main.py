@@ -84,6 +84,7 @@ async def run_live_simulation(n: int = 5, category: str = None):
     async with httpx.AsyncClient(timeout=30.0) as client:
         for i in range(n):
             task = gen(category=category)
+            task["mode"] = "simulation"
             try:
                 resp = await client.post(
                     f"{ORCHESTRATOR_URL}/pipeline/full", json=task

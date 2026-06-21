@@ -88,6 +88,8 @@ def check_viability(title: str, description: str) -> str | None:
 async def _init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
                 evaluation_id TEXT PRIMARY KEY,

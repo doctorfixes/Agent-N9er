@@ -10,7 +10,7 @@ from pathlib import Path
 
 SERVICES = {
     "orchestrator": os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db"),
-    "marketplace": os.getenv("DB_PATH", "/data/marketplace.db"),
+    "marketplace": os.getenv("MARKETPLACE_DB_PATH", "/data/marketplace.db"),
     "execution": os.getenv("EXECUTION_DB_PATH", "/data/execution.db"),
     "reputation": os.getenv("REPUTATION_DB_PATH", "/data/reputation.db"),
     "recurring": os.getenv("RECURRING_DB_PATH", "/data/recurring.db"),

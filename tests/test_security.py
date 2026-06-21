@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 import pytest
 
 _tmpdir = tempfile.mkdtemp()
-os.environ["DB_PATH"] = os.path.join(_tmpdir, "test_security.db")
+os.environ["MARKETPLACE_DB_PATH"] = os.path.join(_tmpdir, "test_security.db")
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, root)

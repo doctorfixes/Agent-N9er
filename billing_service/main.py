@@ -39,6 +39,7 @@ class InvoiceRequest(BaseModel):
     token_cost_usd: float = 0
     platform: str = "direct"
     metadata: dict = Field(default_factory=dict)
+    mode: str = "production"
 
 
 class InvoiceRecord(BaseModel):
@@ -66,6 +67,8 @@ VALID_STATUSES = {"draft", "sent", "paid", "failed", "refunded", "cancelled"}
 async def _init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 invoice_id TEXT PRIMARY KEY,
@@ -130,11 +133,15 @@ async def create_invoice(req: InvoiceRequest) -> InvoiceRecord:
     profit = round(req.amount_usd - req.token_cost_usd, 4)
 
     stripe_invoice_id = None
-    if stripe and req.client_email:
-        try:
-            stripe_invoice_id = await _create_stripe_invoice(req, invoice_id)
-        except Exception as e:
-            logger.error("Stripe invoice creation failed: %s", e)
+    if req.mode == "simulation":
+        status = "simulated"
+    else:
+        if stripe and req.client_email:
+            try:
+                stripe_invoice_id = await _create_stripe_invoice(req, invoice_id)
+            except Exception as e:
+                logger.error("Stripe invoice creation failed: %s", e)
+        status = "sent" if stripe_invoice_id else "draft"
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -144,14 +151,14 @@ async def create_invoice(req: InvoiceRequest) -> InvoiceRecord:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (invoice_id, req.prospect_id, req.client_email, req.description,
              req.amount_usd, req.token_cost_usd, profit, req.platform,
-             "sent" if stripe_invoice_id else "draft", stripe_invoice_id),
+             status, stripe_invoice_id),
         )
         await _log_event(db, invoice_id, "created", req.amount_usd)
         await db.commit()
 
     logger.info(
-        "Invoice %s created: $%.2f for %s (profit $%.2f)",
-        invoice_id, req.amount_usd, req.prospect_id, profit,
+        "Invoice %s created: $%.2f for %s (profit $%.2f, mode=%s)",
+        invoice_id, req.amount_usd, req.prospect_id, profit, req.mode,
     )
 
     return InvoiceRecord(
@@ -159,7 +166,7 @@ async def create_invoice(req: InvoiceRequest) -> InvoiceRecord:
         client_email=req.client_email, description=req.description,
         amount_usd=req.amount_usd, token_cost_usd=req.token_cost_usd,
         profit_usd=profit, platform=req.platform,
-        status="sent" if stripe_invoice_id else "draft",
+        status=status,
         stripe_invoice_id=stripe_invoice_id,
     )
 
@@ -293,7 +300,7 @@ async def stripe_webhook(request: Request):
 @app.get("/revenue")
 async def revenue_summary():
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM invoices")
+        cursor = await db.execute("SELECT COUNT(*) FROM invoices WHERE status != 'simulated'")
         total = (await cursor.fetchone())[0]
 
         cursor = await db.execute("SELECT COUNT(*) FROM invoices WHERE status = 'paid'")
@@ -327,7 +334,7 @@ async def conversion_funnel(days: int = 30):
     """Conversion funnel: invoiced → sent → paid, with rates and revenue by platform."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT COUNT(*) FROM invoices WHERE created_at >= datetime('now', ?)",
+            "SELECT COUNT(*) FROM invoices WHERE status != 'simulated' AND created_at >= datetime('now', ?)",
             (f"-{days} days",),
         )
         total = (await cursor.fetchone())[0]
@@ -354,7 +361,7 @@ async def conversion_funnel(days: int = 30):
             """SELECT platform, COUNT(*) as cnt,
                       SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid_cnt,
                       COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_usd ELSE 0 END), 0) as revenue
-               FROM invoices WHERE created_at >= datetime('now', ?)
+               FROM invoices WHERE status != 'simulated' AND created_at >= datetime('now', ?)
                GROUP BY platform ORDER BY revenue DESC""",
             (f"-{days} days",),
         )
