@@ -3,7 +3,7 @@
 ## Netlify project
 
 - Site URL: https://funny-bonbon-52a4b3.netlify.app/
-- Netlify build config is defined in `/home/runner/work/Agent-N9er/Agent-N9er/netlify.toml`.
+- Netlify build config is defined in `netlify.toml`.
 
 ### Required Netlify environment variables
 
