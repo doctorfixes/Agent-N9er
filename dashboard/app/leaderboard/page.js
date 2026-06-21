@@ -2,85 +2,101 @@
 
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((res) => res.json());
+const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
 
-function Medal({ rank }) {
-  if (rank === 1) return <span style={{ fontSize: "16px" }}>1st</span>;
-  if (rank === 2) return <span style={{ fontSize: "14px" }}>2nd</span>;
-  if (rank === 3) return <span style={{ fontSize: "14px" }}>3rd</span>;
-  return <span style={{ color: "#6b7280" }}>{rank}</span>;
+function ScoreBar({ score, max }) {
+  const pct = max > 0 ? Math.min(100, (score / max) * 100) : 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ width: 80, height: 6, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{
+          width: `${pct}%`, height: "100%", borderRadius: 3,
+          background: pct > 60 ? "var(--accent-green)" : pct > 30 ? "var(--accent-amber)" : "var(--accent-red)",
+          boxShadow: pct > 60 ? "var(--glow-green)" : "none",
+        }} />
+      </div>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>{score}</span>
+    </div>
+  );
 }
 
+const RANK_ICONS = { 1: "I", 2: "II", 3: "III" };
+
 export default function LeaderboardPage() {
-  const { data, error, isLoading } = useSWR("/api/agents", fetcher, { refreshInterval: 10000 });
+  const { data: agents } = useSWR("/api/agents", fetcher, { refreshInterval: 10000 });
 
-  if (isLoading) return <p style={{ color: "#6b7280" }}>Loading leaderboard...</p>;
-  if (error) return <p style={{ color: "#ef4444" }}>Failed to load leaderboard</p>;
+  const sorted = agents
+    ? Object.entries(agents)
+        .map(([id, a]) => ({ id, ...a }))
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    : [];
 
-  const agents = data ?? {};
-  const entries = Object.entries(agents)
-    .map(([id, stats]) => ({ id, ...stats, total: (stats.success || 0) + (stats.fail || 0), displayName: stats.nickname || id.slice(0, 12) }))
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-  const topScore = entries[0]?.score ?? 0;
+  const maxScore = sorted.length > 0 ? Math.max(...sorted.map((a) => a.score ?? 0)) : 1;
 
   return (
     <div>
-      <div style={{ marginBottom: "20px" }}>
-        <h1 style={{ margin: "0 0 4px 0", fontSize: "1.5em" }}>Agent Leaderboard</h1>
-        <p style={{ margin: 0, color: "#6b7280", fontSize: "14px" }}>
-          {entries.length} agent{entries.length !== 1 ? "s" : ""} ranked by reputation score
-        </p>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: "var(--accent-cyan)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 16 }}>
+        Agent Leaderboard
       </div>
 
-      {entries.length === 0 ? (
-        <div style={{ background: "white", padding: "40px", borderRadius: "8px", border: "1px solid #e5e7eb", textAlign: "center" }}>
-          <p style={{ color: "#9ca3af", fontSize: "15px" }}>No agents registered yet. Dispatch tasks from Mission Control to populate the leaderboard.</p>
-        </div>
-      ) : (
-        <div style={{ background: "white", borderRadius: "8px", border: "1px solid #e5e7eb", overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid #e5e7eb", textAlign: "left", background: "#f9fafb" }}>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "60px" }}>Rank</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151" }}>Agent</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "90px" }}>Rating</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "70px" }}>Jobs</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "80px" }}>Wins</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "80px" }}>Losses</th>
-                <th style={{ padding: "10px 14px", fontWeight: 600, color: "#374151", width: "100px" }}>Score</th>
+      <div className="panel">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th style={{ width: 50 }}>Rank</th>
+              <th>Agent</th>
+              <th>Rating</th>
+              <th style={{ textAlign: "right" }}>Jobs</th>
+              <th style={{ textAlign: "right" }}>Wins</th>
+              <th style={{ textAlign: "right" }}>Losses</th>
+              <th>Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length > 0 ? sorted.map((agent, i) => {
+              const rank = i + 1;
+              const displayName = agent.nickname || agent.id?.substring(0, 14);
+              const isTop3 = rank <= 3;
+
+              return (
+                <tr key={agent.id} style={isTop3 ? { background: "rgba(245,158,11,0.03)" } : undefined}>
+                  <td style={{
+                    fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 14, textAlign: "center",
+                    color: rank === 1 ? "var(--accent-amber)" : rank === 2 ? "var(--text-secondary)" : rank === 3 ? "#cd7f32" : "var(--text-muted)",
+                  }}>
+                    {RANK_ICONS[rank] || rank}
+                  </td>
+                  <td>
+                    <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>{displayName}</div>
+                    {agent.nickname && (
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-muted)", marginTop: 1 }}>{agent.id?.substring(0, 16)}</div>
+                    )}
+                  </td>
+                  <td>
+                    {agent.avg_rating > 0 ? (
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-amber)" }}>
+                        {agent.avg_rating?.toFixed(1)} <span style={{ fontSize: 9, color: "var(--text-muted)" }}>({agent.total_ratings})</span>
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--text-muted)", fontSize: 10 }}>---</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: "right", color: "var(--text-secondary)" }}>{agent.jobs_completed ?? (agent.success + agent.fail)}</td>
+                  <td style={{ textAlign: "right", color: "var(--accent-green)" }}>{agent.success}</td>
+                  <td style={{ textAlign: "right", color: "var(--accent-red)" }}>{agent.fail}</td>
+                  <td><ScoreBar score={agent.score ?? 0} max={maxScore} /></td>
+                </tr>
+              );
+            }) : (
+              <tr>
+                <td colSpan={7} style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                  No agents registered. Register agents to populate the leaderboard.
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {entries.map((agent, i) => {
-                const barWidth = topScore > 0 ? ((agent.score ?? 0) / topScore * 100) : 0;
-                const stars = agent.avg_rating ? agent.avg_rating.toFixed(1) : "-";
-                return (
-                  <tr key={agent.id} style={{ borderBottom: "1px solid #f3f4f6", background: i < 3 ? "#fefce8" : "transparent" }}>
-                    <td style={{ padding: "10px 14px", textAlign: "center" }}><Medal rank={i + 1} /></td>
-                    <td style={{ padding: "10px 14px" }}>
-                      <div style={{ fontWeight: 600, fontSize: "13px" }}>{agent.displayName}</div>
-                      {agent.nickname && <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#9ca3af" }}>{agent.id.slice(0, 12)}</div>}
-                    </td>
-                    <td style={{ padding: "10px 14px", fontWeight: 600, color: "#f59e0b" }}>{stars} {agent.total_ratings ? `(${agent.total_ratings})` : ""}</td>
-                    <td style={{ padding: "10px 14px", color: "#374151" }}>{agent.jobs_completed || 0}</td>
-                    <td style={{ padding: "10px 14px", color: "#16a34a", fontWeight: 600 }}>{agent.success || 0}</td>
-                    <td style={{ padding: "10px 14px", color: "#dc2626" }}>{agent.fail || 0}</td>
-                    <td style={{ padding: "10px 14px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <div style={{ flex: 1, height: "6px", background: "#f3f4f6", borderRadius: "3px", overflow: "hidden" }}>
-                          <div style={{ width: `${barWidth}%`, height: "100%", background: "#2563eb", borderRadius: "3px" }} />
-                        </div>
-                        <span style={{ fontWeight: 600, minWidth: "30px", textAlign: "right" }}>{agent.score ?? 0}</span>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

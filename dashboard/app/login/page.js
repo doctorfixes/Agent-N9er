@@ -10,98 +10,87 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  async function handleSubmit(e) {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    setError("");
+    if (!username || !password) {
+      setError("CREDENTIALS REQUIRED");
+      return;
+    }
     setLoading(true);
-
+    setError("");
     try {
       const resp = await fetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
-
-      if (!resp.ok) {
-        const data = await resp.json();
-        setError(data.error || "Login failed");
-        setLoading(false);
-        return;
+      if (resp.ok) {
+        router.push("/");
+        router.refresh();
+      } else {
+        setError("ACCESS DENIED");
       }
-
-      router.push("/");
-      router.refresh();
     } catch {
-      setError("Network error");
-      setLoading(false);
+      setError("CONNECTION FAILED");
     }
-  }
+    setLoading(false);
+  };
 
   return (
-    <div style={{
-      display: "flex", justifyContent: "center", alignItems: "center",
-      minHeight: "80vh",
-    }}>
-      <div style={{
-        background: "white", padding: "40px", borderRadius: "8px",
-        boxShadow: "0 2px 10px rgba(0,0,0,0.1)", width: "100%", maxWidth: "380px",
-      }}>
-        <h1 style={{ margin: "0 0 8px 0", fontSize: "1.5em" }}>Agent N9er</h1>
-        <p style={{ margin: "0 0 24px 0", color: "#666", fontSize: "14px" }}>
-          Sign in to Mission Control
-        </p>
+    <div className="login-container">
+      <div className="login-box">
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 22, fontWeight: 700, color: "var(--accent-cyan)", letterSpacing: "0.1em" }}>
+            AGENT N9ER
+          </div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginTop: 6, letterSpacing: "0.15em", textTransform: "uppercase" }}>
+            Command Center Access
+          </div>
+        </div>
 
         <form onSubmit={handleSubmit}>
-          <div style={{ marginBottom: "16px" }}>
-            <label style={{ display: "block", marginBottom: "4px", fontSize: "14px", fontWeight: 500 }}>
-              Username
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Operator ID
             </label>
             <input
-              type="text"
+              className="cmd-input"
+              style={{ width: "100%" }}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              required
-              style={{
-                width: "100%", padding: "8px", fontSize: "14px",
-                border: "1px solid #ccc", borderRadius: "4px", boxSizing: "border-box",
-              }}
+              autoFocus
             />
           </div>
-
-          <div style={{ marginBottom: "20px" }}>
-            <label style={{ display: "block", marginBottom: "4px", fontSize: "14px", fontWeight: 500 }}>
-              Password
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: "block", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Access Key
             </label>
             <input
+              className="cmd-input"
+              style={{ width: "100%" }}
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-              style={{
-                width: "100%", padding: "8px", fontSize: "14px",
-                border: "1px solid #ccc", borderRadius: "4px", boxSizing: "border-box",
-              }}
             />
           </div>
 
           {error && (
-            <p style={{ color: "#d32f2f", fontSize: "13px", margin: "0 0 16px 0" }}>
+            <div style={{
+              marginBottom: 16, padding: "8px 12px", borderRadius: 4,
+              background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)",
+              fontFamily: "var(--font-mono)", fontSize: 11, color: "#f87171", textAlign: "center",
+            }}>
               {error}
-            </p>
+            </div>
           )}
 
           <button
+            className="cmd-btn primary"
+            style={{ width: "100%", padding: "10px 16px" }}
             type="submit"
             disabled={loading}
-            style={{
-              width: "100%", padding: "10px", fontSize: "14px", fontWeight: 600,
-              background: "#111827", color: "white", border: "none", borderRadius: "6px",
-              cursor: loading ? "not-allowed" : "pointer",
-            }}
           >
-            {loading ? "Signing in..." : "Sign In"}
+            {loading ? "AUTHENTICATING..." : "AUTHENTICATE"}
           </button>
         </form>
       </div>

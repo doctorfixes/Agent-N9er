@@ -1,96 +1,118 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useRef } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json());
+const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
 
-function StatusDot({ status }) {
-  const color = status === "healthy" ? "#22c55e" : status === "degraded" ? "#eab308" : "#ef4444";
-  return <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: color, marginRight: 6 }} />;
-}
-
-function Card({ title, children, style }) {
+function Panel({ title, dot, children, actions }) {
   return (
-    <div style={{ background: "white", padding: "20px", borderRadius: "8px", border: "1px solid #e5e7eb", ...style }}>
-      {title && <h3 style={{ margin: "0 0 12px 0", fontSize: "15px", fontWeight: 600, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" }}>{title}</h3>}
-      {children}
+    <div className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <span className={`dot ${dot || ""}`} />
+          {title}
+        </div>
+        {actions && <div style={{ display: "flex", gap: 6 }}>{actions}</div>}
+      </div>
+      <div className="panel-body">{children}</div>
     </div>
   );
+}
+
+function Metric({ label, value, sub, color }) {
+  return (
+    <div className={`metric ${color || ""}`}>
+      <div className="metric-label">{label}</div>
+      <div className="metric-value">{value}</div>
+      {sub && <div className="metric-sub">{sub}</div>}
+    </div>
+  );
+}
+
+function StatusDot({ status }) {
+  const cls = status === "healthy" ? "online" : status === "degraded" ? "degraded" : "offline";
+  return <span className={`status-dot ${cls}`} />;
 }
 
 export default function MissionControl() {
   const [objective, setObjective] = useState("");
   const [mode, setMode] = useState("full");
   const [taskResult, setTaskResult] = useState(null);
-  const [taskLoading, setTaskLoading] = useState(false);
+  const [dispatching, setDispatching] = useState(false);
   const [ruleObjective, setRuleObjective] = useState("");
-  const [ruleCategory, setRuleCategory] = useState("");
-  const [triggerResult, setTriggerResult] = useState(null);
-  const [triggerLoading, setTriggerLoading] = useState(false);
+  const [ruleCategory, setRuleCategory] = useState("uncategorized");
   const [activity, setActivity] = useState([]);
+  const activityRef = useRef(activity);
+  activityRef.current = activity;
 
   const { data: health } = useSWR("/api/health", fetcher, { refreshInterval: 15000 });
   const { data: tasks } = useSWR("/api/tasks", fetcher, { refreshInterval: 5000 });
   const { data: rules, mutate: mutateRules } = useSWR("/api/recurring", fetcher, { refreshInterval: 10000 });
   const { data: agents } = useSWR("/api/agents", fetcher, { refreshInterval: 10000 });
+  const { data: analytics } = useSWR("/api/analytics?days=1", fetcher, { refreshInterval: 30000 });
+  const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
+
+  const addActivity = (msg, type = "info") => {
+    const entry = { time: new Date().toLocaleTimeString("en-US", { hour12: false }), msg, type };
+    const updated = [entry, ...activityRef.current].slice(0, 30);
+    setActivity(updated);
+  };
 
   const taskList = Array.isArray(tasks) ? tasks : [];
-  const ruleList = Array.isArray(rules) ? rules : [];
-  const agentEntries = agents ? Object.entries(agents) : [];
-
   const activeCount = taskList.filter((t) => t.status === "open" || t.status === "awarded").length;
   const completedCount = taskList.filter((t) => t.status === "completed").length;
   const failedCount = taskList.filter((t) => t.status === "failed").length;
+  const agentEntries = agents ? Object.entries(agents) : [];
+  const services = health ? Object.entries(health) : [];
+  const onlineServices = services.filter(([, v]) => v?.status === "healthy").length;
 
-  const addActivity = useCallback((msg) => {
-    setActivity((prev) => [{ msg, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 20));
-  }, []);
-
-  async function dispatchTask(e) {
-    e.preventDefault();
+  const dispatchTask = async () => {
     if (!objective.trim()) return;
-    setTaskLoading(true);
+    setDispatching(true);
     setTaskResult(null);
-    const endpoint = mode === "full" ? "/api/pipeline/full" : "/api/pipeline";
+    addActivity(`Dispatching: "${objective.substring(0, 60)}..."`, "info");
     try {
-      const resp = await fetch(endpoint, {
+      const url = mode === "full" ? "/api/pipeline/full" : "/api/pipeline";
+      const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ objective }),
       });
       const data = await resp.json();
       setTaskResult(data);
-      addActivity(`Dispatched: "${objective.slice(0, 50)}" → ${data.status || "submitted"}`);
+      if (data.status === "completed") {
+        addActivity(`Task ${data.task_id?.substring(0, 8)} completed by ${data.winner?.agent_id}`, "success");
+      } else if (data.status === "task_published") {
+        addActivity(`Task ${data.task_id?.substring(0, 8)} published (priority: ${data.ranked?.priority_score?.toFixed(2)})`, "info");
+      } else {
+        addActivity(`Task result: ${data.status}`, data.status === "failed" ? "error" : "info");
+      }
       setObjective("");
-    } catch {
-      setTaskResult({ error: "Pipeline unreachable" });
-      addActivity(`Failed to dispatch: "${objective.slice(0, 50)}"`);
+    } catch (e) {
+      setTaskResult({ error: e.message });
+      addActivity(`Dispatch failed: ${e.message}`, "error");
     }
-    setTaskLoading(false);
-  }
+    setDispatching(false);
+  };
 
-  async function addRule(e) {
-    e.preventDefault();
+  const addRule = async () => {
     if (!ruleObjective.trim()) return;
     try {
       await fetch("/api/recurring", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ objective: ruleObjective, category: ruleCategory || "uncategorized" }),
+        body: JSON.stringify({ objective: ruleObjective, category: ruleCategory }),
       });
-      addActivity(`Rule added: "${ruleObjective.slice(0, 50)}"`);
+      addActivity(`Rule created: "${ruleObjective.substring(0, 40)}..."`, "info");
       setRuleObjective("");
-      setRuleCategory("");
       mutateRules();
-    } catch {
-      addActivity("Failed to add rule");
+    } catch (e) {
+      addActivity(`Rule creation failed: ${e.message}`, "error");
     }
-  }
+  };
 
-  async function triggerRecurring() {
-    setTriggerLoading(true);
-    setTriggerResult(null);
+  const triggerRecurring = async () => {
     try {
       const resp = await fetch("/api/recurring", {
         method: "POST",
@@ -98,210 +120,176 @@ export default function MissionControl() {
         body: JSON.stringify({ action: "trigger" }),
       });
       const data = await resp.json();
-      setTriggerResult(data);
-      addActivity(`Recurring tick: ${data.processed || 0} tasks processed`);
-    } catch {
-      setTriggerResult({ error: "Trigger failed" });
-      addActivity("Recurring trigger failed");
+      addActivity(`Recurring triggered: ${data.processed || 0} tasks processed`, "success");
+    } catch (e) {
+      addActivity(`Trigger failed: ${e.message}`, "error");
     }
-    setTriggerLoading(false);
-  }
-
-  const healthServices = health?.services || {};
-  const healthyCount = Object.values(healthServices).filter((s) => s.status === "healthy").length;
-  const totalServices = Object.keys(healthServices).length;
+  };
 
   return (
     <div>
-      <div style={{ marginBottom: "24px" }}>
-        <h1 style={{ margin: "0 0 4px 0", fontSize: "1.6em" }}>Mission Control</h1>
-        <p style={{ margin: 0, color: "#6b7280", fontSize: "14px" }}>
-          Autonomous task orchestration — dispatch, monitor, and manage your agent workforce
-        </p>
+      <div className="metric-grid" style={{ marginBottom: 16 }}>
+        <Metric label="Services Online" value={`${onlineServices}/${services.length}`} color={onlineServices === services.length ? "green" : "red"} sub={onlineServices === services.length ? "All nominal" : "Degraded"} />
+        <Metric label="Active Tasks" value={activeCount} color="cyan" sub="In pipeline" />
+        <Metric label="Completed" value={completedCount} color="green" sub="Total success" />
+        <Metric label="Failed" value={failedCount} color="red" />
+        <Metric label="Agents" value={agentEntries.length} color="blue" sub="Registered" />
+        <Metric label="Exec / 24h" value={analytics?.total_executions ?? 0} color="purple" sub={`${((analytics?.success_rate ?? 0) * 100).toFixed(0)}% success`} />
       </div>
 
-      {/* Status Bar */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "12px", marginBottom: "20px" }}>
-        <Card style={{ padding: "14px 16px", textAlign: "center" }}>
-          <div style={{ fontSize: "24px", fontWeight: 700 }}>{healthyCount}/{totalServices}</div>
-          <div style={{ fontSize: "12px", color: "#6b7280" }}>Services Online</div>
-        </Card>
-        <Card style={{ padding: "14px 16px", textAlign: "center" }}>
-          <div style={{ fontSize: "24px", fontWeight: 700 }}>{activeCount}</div>
-          <div style={{ fontSize: "12px", color: "#6b7280" }}>Active Tasks</div>
-        </Card>
-        <Card style={{ padding: "14px 16px", textAlign: "center" }}>
-          <div style={{ fontSize: "24px", fontWeight: 700, color: "#22c55e" }}>{completedCount}</div>
-          <div style={{ fontSize: "12px", color: "#6b7280" }}>Completed</div>
-        </Card>
-        <Card style={{ padding: "14px 16px", textAlign: "center" }}>
-          <div style={{ fontSize: "24px", fontWeight: 700, color: "#ef4444" }}>{failedCount}</div>
-          <div style={{ fontSize: "12px", color: "#6b7280" }}>Failed</div>
-        </Card>
-        <Card style={{ padding: "14px 16px", textAlign: "center" }}>
-          <div style={{ fontSize: "24px", fontWeight: 700 }}>{agentEntries.length}</div>
-          <div style={{ fontSize: "12px", color: "#6b7280" }}>Agents</div>
-        </Card>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }}>
-        {/* Dispatch Task */}
-        <Card title="Dispatch Task">
-          <form onSubmit={dispatchTask}>
+      <div className="cmd-grid main-layout" style={{ marginBottom: 16 }}>
+        <Panel title="Task Dispatch" dot="info">
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input
-              type="text"
+              className="cmd-input"
+              style={{ flex: 1 }}
+              placeholder="Enter task objective..."
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
-              placeholder="Describe the task objective..."
-              style={{ width: "100%", padding: "10px", fontSize: "14px", border: "1px solid #d1d5db", borderRadius: "6px", marginBottom: "10px", boxSizing: "border-box" }}
+              onKeyDown={(e) => e.key === "Enter" && dispatchTask()}
             />
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value)}
-                style={{ padding: "8px", fontSize: "13px", border: "1px solid #d1d5db", borderRadius: "6px" }}
-              >
-                <option value="full">Autonomous (bid + execute)</option>
-                <option value="publish">Publish only (manual award)</option>
-              </select>
-              <button
-                type="submit"
-                disabled={taskLoading}
-                style={{ padding: "8px 20px", fontSize: "13px", fontWeight: 600, background: "#2563eb", color: "white", border: "none", borderRadius: "6px", cursor: taskLoading ? "not-allowed" : "pointer" }}
-              >
-                {taskLoading ? "Dispatching..." : "Dispatch"}
-              </button>
-            </div>
-          </form>
-          {taskResult && (
-            <div style={{ marginTop: "10px", padding: "10px", background: taskResult.error ? "#fef2f2" : "#f0fdf4", borderRadius: "6px", fontSize: "13px" }}>
-              <strong>{taskResult.status || taskResult.error || "Submitted"}</strong>
-              {taskResult.task_id && <span style={{ marginLeft: "8px", fontFamily: "monospace", fontSize: "11px", color: "#6b7280" }}>{taskResult.task_id.slice(0, 12)}</span>}
-              {taskResult.winner && <span style={{ marginLeft: "8px" }}>Agent: {taskResult.winner.agent_id?.slice(0, 12)}</span>}
-            </div>
-          )}
-        </Card>
-
-        {/* Recurring Rules */}
-        <Card title="Recurring Automation">
-          <form onSubmit={addRule} style={{ marginBottom: "10px" }}>
-            <input
-              type="text"
-              value={ruleObjective}
-              onChange={(e) => setRuleObjective(e.target.value)}
-              placeholder="Recurring task objective..."
-              style={{ width: "100%", padding: "8px", fontSize: "13px", border: "1px solid #d1d5db", borderRadius: "6px", marginBottom: "8px", boxSizing: "border-box" }}
-            />
-            <div style={{ display: "flex", gap: "8px" }}>
-              <input
-                type="text"
-                value={ruleCategory}
-                onChange={(e) => setRuleCategory(e.target.value)}
-                placeholder="Category (optional)"
-                style={{ flex: 1, padding: "8px", fontSize: "13px", border: "1px solid #d1d5db", borderRadius: "6px" }}
-              />
-              <button type="submit" style={{ padding: "8px 14px", fontSize: "13px", background: "#059669", color: "white", border: "none", borderRadius: "6px", cursor: "pointer" }}>
-                Add Rule
-              </button>
-            </div>
-          </form>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <span style={{ fontSize: "13px", color: "#6b7280" }}>{ruleList.length} rule{ruleList.length !== 1 ? "s" : ""} configured</span>
-            <button
-              onClick={triggerRecurring}
-              disabled={triggerLoading || ruleList.length === 0}
-              style={{ padding: "6px 14px", fontSize: "12px", fontWeight: 600, background: "#7c3aed", color: "white", border: "none", borderRadius: "6px", cursor: triggerLoading ? "not-allowed" : "pointer" }}
-            >
-              {triggerLoading ? "Running..." : "Run All Now"}
+            <select className="cmd-select" value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="full">Autonomous</option>
+              <option value="publish">Publish Only</option>
+            </select>
+            <button className="cmd-btn primary" onClick={dispatchTask} disabled={dispatching || !objective.trim()}>
+              {dispatching ? ">>>" : "Dispatch"}
             </button>
           </div>
-          {ruleList.length > 0 && (
-            <div style={{ maxHeight: "120px", overflow: "auto", fontSize: "12px" }}>
-              {ruleList.map((r, i) => (
-                <div key={r.rule_id || i} style={{ padding: "4px 0", borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between" }}>
-                  <span>{r.objective?.slice(0, 50)}</span>
-                  <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{r.category || "uncategorized"}</span>
+          {taskResult && (
+            <div style={{
+              padding: "10px 14px",
+              borderRadius: 4,
+              fontSize: 12,
+              fontFamily: "var(--font-mono)",
+              background: taskResult.error ? "rgba(239,68,68,0.1)" : "rgba(16,185,129,0.1)",
+              border: `1px solid ${taskResult.error ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.3)"}`,
+              color: taskResult.error ? "#f87171" : "#34d399",
+            }}>
+              {taskResult.error
+                ? `ERR: ${taskResult.error}`
+                : `${taskResult.status?.toUpperCase()} // ID: ${taskResult.task_id?.substring(0, 12)} ${taskResult.winner ? `// AGENT: ${taskResult.winner.agent_id}` : ""}`}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="System Status" dot={onlineServices === services.length ? "" : "error"}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {services.map(([name, info]) => (
+              <div key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <StatusDot status={info?.status} />
+                  <span style={{ color: "var(--text-secondary)", textTransform: "uppercase" }}>{name}</span>
+                </div>
+                <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
+                  {info?.status === "healthy" ? "OK" : info?.status || "---"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="cmd-grid main-layout" style={{ marginBottom: 16 }}>
+        <Panel title="Recent Activity" dot="">
+          {taskList.length > 0 ? (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Task ID</th>
+                  <th>Objective</th>
+                  <th>Priority</th>
+                  <th>Status</th>
+                  <th>Agent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {taskList.slice(0, 10).map((t) => (
+                  <tr key={t.id}>
+                    <td style={{ color: "var(--accent-cyan)" }}>{t.id?.substring(0, 10)}</td>
+                    <td style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>{t.objective}</td>
+                    <td>{t.priority_score?.toFixed(2)}</td>
+                    <td><span className={`badge ${t.status}`}>{t.status}</span></td>
+                    <td style={{ color: "var(--text-muted)" }}>{t.awarded_to?.substring(0, 10) || "---"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div style={{ textAlign: "center", padding: 30, color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+              No tasks dispatched. Use the panel above to queue work.
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Activity Log" dot="">
+          <div style={{ maxHeight: 280, overflow: "auto" }}>
+            {activity.length > 0 ? activity.map((a, i) => (
+              <div key={i} className="activity-item">
+                <span className="time">{a.time}</span>
+                <span className="msg" style={{
+                  color: a.type === "error" ? "var(--accent-red)" : a.type === "success" ? "var(--accent-green)" : "var(--text-secondary)"
+                }}>{a.msg}</span>
+              </div>
+            )) : (
+              <div style={{ textAlign: "center", padding: 30, color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                Awaiting system events...
+              </div>
+            )}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="cmd-grid cols-2">
+        <Panel title="Recurring Automation" dot="" actions={
+          <button className="cmd-btn sm success" onClick={triggerRecurring}>Trigger All</button>
+        }>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input
+              className="cmd-input"
+              style={{ flex: 1 }}
+              placeholder="Rule objective..."
+              value={ruleObjective}
+              onChange={(e) => setRuleObjective(e.target.value)}
+            />
+            <select className="cmd-select" value={ruleCategory} onChange={(e) => setRuleCategory(e.target.value)}>
+              <option value="uncategorized">General</option>
+              <option value="code_development">Dev</option>
+              <option value="data_analysis">Data</option>
+              <option value="content_creation">Content</option>
+            </select>
+            <button className="cmd-btn sm primary" onClick={addRule} disabled={!ruleObjective.trim()}>Add</button>
+          </div>
+          {rules && rules.length > 0 ? (
+            <div style={{ maxHeight: 160, overflow: "auto" }}>
+              {rules.map((r) => (
+                <div key={r.rule_id} style={{ padding: "6px 0", borderBottom: "1px solid rgba(30,45,74,0.3)", fontSize: 11, fontFamily: "var(--font-mono)", display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>{r.objective?.substring(0, 50)}</span>
+                  <span className={`badge ${r.category === "uncategorized" ? "draft" : "approved"}`}>{r.category}</span>
                 </div>
               ))}
             </div>
-          )}
-          {triggerResult && (
-            <div style={{ marginTop: "8px", padding: "8px", background: "#f5f3ff", borderRadius: "6px", fontSize: "12px" }}>
-              Processed: {triggerResult.processed || 0} tasks
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "16px" }}>
-        {/* Recent Tasks */}
-        <Card title="Recent Activity">
-          {taskList.length === 0 ? (
-            <p style={{ color: "#9ca3af", fontSize: "13px" }}>No tasks dispatched yet.</p>
           ) : (
-            <div style={{ maxHeight: "300px", overflow: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                <thead>
-                  <tr style={{ borderBottom: "1px solid #e5e7eb", textAlign: "left" }}>
-                    <th style={{ padding: "6px 8px", fontWeight: 600, color: "#6b7280" }}>Objective</th>
-                    <th style={{ padding: "6px 8px", fontWeight: 600, color: "#6b7280", width: "80px" }}>Priority</th>
-                    <th style={{ padding: "6px 8px", fontWeight: 600, color: "#6b7280", width: "90px" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {taskList.slice(0, 15).map((t, i) => (
-                    <tr key={t.id || i} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                      <td style={{ padding: "6px 8px" }}>{t.objective?.slice(0, 60) || "-"}</td>
-                      <td style={{ padding: "6px 8px", fontFamily: "monospace" }}>{t.priority_score ?? "-"}</td>
-                      <td style={{ padding: "6px 8px" }}>
-                        <span style={{
-                          padding: "2px 8px", borderRadius: "10px", fontSize: "11px", fontWeight: 600,
-                          background: t.status === "completed" ? "#dcfce7" : t.status === "failed" ? "#fee2e2" : t.status === "awarded" ? "#dbeafe" : "#f3f4f6",
-                          color: t.status === "completed" ? "#166534" : t.status === "failed" ? "#991b1b" : t.status === "awarded" ? "#1e40af" : "#374151",
-                        }}>
-                          {t.status || "open"}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ textAlign: "center", padding: 20, color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>No automation rules</div>
+          )}
+        </Panel>
+
+        <Panel title="Scan Status" dot={scanState?.running ? "warn" : ""} actions={
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: scanState?.auto_scan_enabled ? "var(--accent-green)" : "var(--text-muted)" }}>
+            {scanState?.auto_scan_enabled ? "AUTO" : "MANUAL"}
+          </span>
+        }>
+          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+            <Metric label="Total Scans" value={scanState?.total_scans ?? 0} color="blue" />
+            <Metric label="Discovered" value={scanState?.total_discovered ?? 0} color="green" />
+            <Metric label="Platforms" value={scanState?.platforms?.length ?? 0} color="cyan" />
+          </div>
+          {scanState?.last_scan_at && (
+            <div style={{ marginTop: 10, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+              Last scan: {new Date(scanState.last_scan_at).toLocaleString()}
             </div>
           )}
-        </Card>
-
-        {/* System Health + Activity Log */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <Card title="System Health">
-            {totalServices === 0 ? (
-              <p style={{ color: "#9ca3af", fontSize: "13px" }}>Checking...</p>
-            ) : (
-              <div style={{ fontSize: "13px" }}>
-                {Object.entries(healthServices).map(([name, info]) => (
-                  <div key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3px 0" }}>
-                    <span><StatusDot status={info.status} />{name}</span>
-                    <span style={{ fontSize: "11px", color: "#9ca3af" }}>{info.status}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          <Card title="Activity Log">
-            {activity.length === 0 ? (
-              <p style={{ color: "#9ca3af", fontSize: "13px" }}>Dispatch a task to see activity.</p>
-            ) : (
-              <div style={{ maxHeight: "180px", overflow: "auto", fontSize: "12px" }}>
-                {activity.map((a, i) => (
-                  <div key={i} style={{ padding: "3px 0", borderBottom: "1px solid #f3f4f6" }}>
-                    <span style={{ color: "#9ca3af", fontFamily: "monospace", marginRight: "6px" }}>{a.time}</span>
-                    {a.msg}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-        </div>
+        </Panel>
       </div>
     </div>
   );
