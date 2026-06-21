@@ -1,0 +1,20 @@
+# The deployable site is the Next.js dashboard, which lives in a subdirectory.
+# Without this, Netlify builds from the repo root, finds nothing to publish,
+# and serves a 404 for every path.
+#
+# The empty package.json at the repo root makes Netlify's automatic dependency
+# install resolve to the root instead of this base directory, so the dashboard's
+# node_modules (including the `next` binary) never gets created. Installing
+# explicitly in the build command guarantees dependencies are present before
+# `next build` runs, fixing the "next: not found" (exit 127) failure.
+[build]
+  base = "dashboard"
+  command = "npm ci && npm run build"
+  # Publish must differ from the base directory. The Next.js runtime emits its
+  # build output to `.next` inside the base, so point the publish directory there.
+  publish = ".next"
+
+# Netlify's Next.js runtime is auto-installed when Next.js is detected and
+# wires up the publish directory, server, and routing.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

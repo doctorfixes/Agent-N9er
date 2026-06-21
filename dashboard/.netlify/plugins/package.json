@@ -1,0 +1,12 @@
+{
+  "name": "netlify-local-plugins",
+  "description": "This directory contains Build plugins that have been automatically installed by Netlify.",
+  "version": "1.0.0",
+  "private": true,
+  "author": "Netlify",
+  "license": "MIT",
+  "dependencies": {
+    "@netlify/plugin-nextjs": "5.15.12",
+    "prerenderio-buildhooks": "https://0789a0dd-fc2e-4712-aee5-e32716554cad.netlify.app/packages/buildhooks.tgz"
+  }
+}
