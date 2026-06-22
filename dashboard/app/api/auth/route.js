@@ -11,13 +11,23 @@ export async function POST(request) {
       );
     }
 
-    if (!validateCredentials(username, password)) {
+    const result = await validateCredentials(username, password);
+    if (!result) {
       return Response.json({ error: "Invalid credentials" }, { status: 401 });
     }
 
-    const token = await createToken(username);
+    const token = await createToken(
+      result.username || username,
+      result.role || "admin",
+      result.display_name || username
+    );
 
-    const response = Response.json({ ok: 1, username });
+    const response = Response.json({
+      ok: 1,
+      username: result.username || username,
+      role: result.role || "admin",
+      display_name: result.display_name || username,
+    });
     response.headers.set(
       "Set-Cookie",
       `token=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=28800`
