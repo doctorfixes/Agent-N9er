@@ -79,7 +79,10 @@ function ProposalModal({ prospect, onClose }) {
 export default function ProspectsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [scanning, setScanning] = useState(false);
+  const [scanningAll, setScanningAll] = useState(false);
   const [scanResult, setScanResult] = useState(null);
+  const [scanAllResult, setScanAllResult] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [proposalTarget, setProposalTarget] = useState(null);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
@@ -94,7 +97,7 @@ export default function ProspectsPage() {
       const resp = await fetch("/api/prospects/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform }),
+        body: JSON.stringify({ platform, query: searchQuery || undefined }),
       });
       setScanResult(await resp.json());
       mutate();
@@ -104,30 +107,33 @@ export default function ProspectsPage() {
     setScanning(false);
   };
 
-  const handleFullScan = async () => {
-    setScanning(true);
+  const handleScanAll = async () => {
+    setScanningAll(true);
+    setScanAllResult(null);
     setScanResult(null);
     try {
-      const resp = await fetch("/api/scan", { method: "POST" });
-      const data = await resp.json();
-      const results = data.results || {};
-      setScanResult({
-        discovered: Object.values(results).reduce((s, r) => s + (r.discovered || 0), 0),
-        new: Object.values(results).reduce((s, r) => s + (r.new || 0), 0),
-        full: true,
+      const resp = await fetch("/api/prospects/scan-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: searchQuery || "",
+          max_per_platform: 10,
+        }),
       });
+      const data = await resp.json();
+      setScanAllResult(data);
       mutate();
     } catch (e) {
-      setScanResult({ error: e.message });
+      setScanAllResult({ error: e.message });
     }
-    setScanning(false);
+    setScanningAll(false);
   };
 
   const statusFilters = ["", "discovered", "approved", "applied", "hired", "executing", "delivered", "paid"];
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 700, color: "var(--accent-cyan)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
           Prospect Pipeline
         </div>
@@ -138,13 +144,39 @@ export default function ProspectsPage() {
             ))}
             {!platforms && <option value="upwork">Upwork</option>}
           </select>
-          <button className="cmd-btn primary" onClick={() => handleScan(document.getElementById("platform-select").value)} disabled={scanning}>
+          <button className="cmd-btn primary" onClick={() => handleScan(document.getElementById("platform-select").value)} disabled={scanning || scanningAll}>
             {scanning ? ">>>" : "Scan"}
           </button>
-          <button className="cmd-btn success" onClick={handleFullScan} disabled={scanning}>
-            {scanning ? "..." : "Full Scan"}
-          </button>
         </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleScanAll(); }}
+          placeholder="Keywords: python developer, web scraping, API integration..."
+          style={{
+            flex: 1, padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: 12,
+            background: "var(--bg-input)", color: "var(--text-primary)",
+            border: "1px solid var(--border)", borderRadius: 4, outline: "none",
+          }}
+        />
+        <button
+          className="cmd-btn"
+          onClick={handleScanAll}
+          disabled={scanning || scanningAll}
+          style={{
+            background: scanningAll ? "rgba(245,158,11,0.2)" : "linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.2))",
+            border: `1px solid ${scanningAll ? "rgba(245,158,11,0.4)" : "rgba(16,185,129,0.4)"}`,
+            color: scanningAll ? "#fbbf24" : "#34d399",
+            padding: "8px 20px", fontWeight: 700, fontSize: 12,
+            fontFamily: "var(--font-mono)", letterSpacing: "0.05em",
+          }}
+        >
+          {scanningAll ? "SCANNING ALL..." : "SCAN ALL PLATFORMS"}
+        </button>
       </div>
 
       {scanState && (
@@ -161,7 +193,33 @@ export default function ProspectsPage() {
           border: `1px solid ${scanResult.error ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.3)"}`,
           color: scanResult.error ? "#f87171" : "#34d399",
         }}>
-          {scanResult.error ? `ERR: ${scanResult.error}` : `FOUND ${scanResult.discovered} // NEW ${scanResult.new}${scanResult.full ? " // FULL SCAN" : ""}`}
+          {scanResult.error ? `ERR: ${scanResult.error}` : `FOUND ${scanResult.discovered} // NEW ${scanResult.new}`}
+        </div>
+      )}
+
+      {scanAllResult && (
+        <div style={{
+          padding: "12px 14px", marginBottom: 12, borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 11,
+          background: scanAllResult.error ? "rgba(239,68,68,0.1)" : "rgba(16,185,129,0.08)",
+          border: `1px solid ${scanAllResult.error ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.25)"}`,
+          color: scanAllResult.error ? "#f87171" : "#34d399",
+        }}>
+          {scanAllResult.error ? `ERR: ${scanAllResult.error}` : (
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 12 }}>
+                SCAN COMPLETE // {scanAllResult.platforms_scanned} PLATFORMS // {scanAllResult.total_new} NEW PROSPECTS
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
+                {scanAllResult.results && Object.entries(scanAllResult.results).map(([platform, r]) => (
+                  <span key={platform} style={{
+                    color: r.skipped ? "var(--text-muted)" : r.error ? "#f87171" : (r.new > 0 ? "#34d399" : "var(--text-secondary)"),
+                  }}>
+                    {platform}: {r.skipped ? `skip(${r.reason})` : r.error ? "err" : `${r.new}new`}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
