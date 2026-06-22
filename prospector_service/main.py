@@ -73,6 +73,35 @@ UPWORK_SEARCH_CATEGORIES = os.getenv(
 GITHUB_API = "https://api.github.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
+SEARCH_KEYWORDS = [
+    kw.strip() for kw in os.getenv(
+        "SCAN_KEYWORDS",
+        "freelance developer needed,looking for developer,need a programmer,"
+        "hire a developer,coding task,software project,build me,automate my,"
+        "web scraping project,data pipeline,API integration,bot development,"
+        "AI project,machine learning task,python developer needed,"
+        "contract developer,remote developer gig"
+    ).split(",") if kw.strip()
+]
+
+REDDIT_SUBREDDITS = [
+    s.strip() for s in os.getenv(
+        "SCAN_REDDIT_SUBREDDITS",
+        "forhire,slavelabour,freelance_forhire,jobbit,WorkOnline,"
+        "remotejs,ProgrammingBuddies,web_design"
+    ).split(",") if s.strip()
+]
+
+CRAIGSLIST_REGIONS = [
+    r.strip() for r in os.getenv(
+        "SCAN_CRAIGSLIST_REGIONS", "newyork,sfbay,losangeles,chicago,seattle,austin"
+    ).split(",") if r.strip()
+]
+
+CUSTOM_RSS_FEEDS = [
+    f.strip() for f in os.getenv("SCAN_CUSTOM_RSS_FEEDS", "").split(",") if f.strip()
+]
+
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
     "hired", "executing", "delivered", "paid", "rated", "rejected",
@@ -197,6 +226,42 @@ PLATFORMS = {
         "status": "active",
         "type": "api",
         "description": "Open-source bounties with Stripe payouts",
+    },
+    "web_search": {
+        "label": "Web Search",
+        "status": "active",
+        "type": "search",
+        "description": "Keyword-based web search across the entire internet via DuckDuckGo",
+    },
+    "reddit": {
+        "label": "Reddit",
+        "status": "active",
+        "type": "api",
+        "description": "Freelance/hiring subreddits — r/forhire, r/slavelabour, and more",
+    },
+    "hackernews": {
+        "label": "Hacker News",
+        "status": "active",
+        "type": "api",
+        "description": "YC Hacker News — Who is Hiring threads and freelance posts",
+    },
+    "craigslist": {
+        "label": "Craigslist",
+        "status": "active",
+        "type": "rss",
+        "description": "Craigslist gigs sections across major metro areas",
+    },
+    "stackoverflow": {
+        "label": "Stack Overflow",
+        "status": "active",
+        "type": "rss",
+        "description": "Stack Overflow Jobs and freelance developer listings",
+    },
+    "custom_rss": {
+        "label": "Custom RSS",
+        "status": "active",
+        "type": "rss",
+        "description": "User-configured RSS feeds for any job/gig source",
     },
 }
 
@@ -1000,6 +1065,368 @@ async def _scan_algora(query: str, category: str, max_results: int) -> list[dict
         logger.warning("Algora fetch failed: %s", e)
 
     return prospects
+
+
+# ---------------------------------------------------------------------------
+# Web-wide scanners
+# ---------------------------------------------------------------------------
+
+@scanner("web_search")
+async def _scan_web_search(query: str, category: str, max_results: int) -> list[dict]:
+    keywords = [query] if query else SEARCH_KEYWORDS[:5]
+    prospects = []
+    seen_urls = set()
+
+    async with _scanner_client(timeout=20.0) as client:
+        for kw in keywords:
+            if len(prospects) >= max_results:
+                break
+            try:
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": kw},
+                    headers={"User-Agent": SCANNER_USER_AGENT},
+                    follow_redirects=True,
+                )
+                resp.raise_for_status()
+                results = _parse_ddg_html(resp.text)
+
+                for r in results:
+                    url = r.get("url", "")
+                    if url in seen_urls or not url:
+                        continue
+                    seen_urls.add(url)
+                    title = r.get("title", "")
+                    snippet = r.get("snippet", "")
+                    budget = _extract_budget(snippet, "max")
+                    prospects.append(_make_prospect(
+                        platform="web_search",
+                        job_id=_url_to_id(url),
+                        title=title[:200],
+                        description=f"[{kw}] {snippet}"[:2000],
+                        budget_min=0,
+                        budget_max=budget,
+                        url=url,
+                        skills=kw,
+                    ))
+                    if len(prospects) >= max_results:
+                        break
+            except httpx.RequestError as e:
+                logger.warning("Web search failed for '%s': %s", kw, e)
+
+    return prospects
+
+
+def _parse_ddg_html(html: str) -> list[dict]:
+    results = []
+    for match in re.finditer(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>(.*?)</a>.*?'
+        r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+        html, re.DOTALL,
+    ):
+        url = match.group(1)
+        if "duckduckgo.com" in url:
+            ud = re.search(r'uddg=([^&]+)', url)
+            if ud:
+                from urllib.parse import unquote
+                url = unquote(ud.group(1))
+        title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        snippet = re.sub(r'<[^>]+>', '', match.group(3)).strip()
+        if title:
+            results.append({"url": url, "title": title, "snippet": snippet})
+    return results
+
+
+def _url_to_id(url: str) -> str:
+    import hashlib
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+@scanner("reddit")
+async def _scan_reddit(query: str, category: str, max_results: int) -> list[dict]:
+    subreddits = [category] if category else REDDIT_SUBREDDITS[:4]
+    prospects = []
+
+    async with _scanner_client(timeout=15.0) as client:
+        for sub in subreddits:
+            if len(prospects) >= max_results:
+                break
+            try:
+                url = f"https://www.reddit.com/r/{sub}/new.json"
+                params = {"limit": min(max_results, 25)}
+                if query:
+                    url = f"https://www.reddit.com/r/{sub}/search.json"
+                    params["q"] = query
+                    params["restrict_sr"] = "on"
+                    params["sort"] = "new"
+
+                resp = await client.get(url, params=params, follow_redirects=True)
+                resp.raise_for_status()
+                data = resp.json()
+
+                for post in data.get("data", {}).get("children", []):
+                    pd = post.get("data", {})
+                    title = pd.get("title", "")
+                    body = pd.get("selftext", "")
+                    flair = (pd.get("link_flair_text") or "").lower()
+
+                    if sub.lower() == "forhire" and "hiring" not in flair:
+                        continue
+
+                    budget = _extract_budget(f"{title} {body}", "max")
+                    permalink = pd.get("permalink", "")
+                    prospects.append(_make_prospect(
+                        platform="reddit",
+                        job_id=pd.get("id", str(uuid.uuid4())),
+                        title=f"[r/{sub}] {title}"[:200],
+                        description=body[:2000],
+                        budget_min=0,
+                        budget_max=budget,
+                        url=f"https://reddit.com{permalink}" if permalink else "",
+                        skills=query or sub,
+                    ))
+                    if len(prospects) >= max_results:
+                        break
+            except httpx.RequestError as e:
+                logger.warning("Reddit scan failed for r/%s: %s", sub, e)
+
+    return prospects
+
+
+@scanner("hackernews")
+async def _scan_hackernews(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with _scanner_client(timeout=20.0) as client:
+            search_query = query or "freelance OR hiring OR contract developer"
+            resp = await client.get(
+                "https://hn.algolia.com/api/v1/search_by_date",
+                params={
+                    "query": search_query,
+                    "tags": "story",
+                    "hitsPerPage": max_results,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for hit in data.get("hits", [])[:max_results]:
+                title = hit.get("title", "")
+                story_text = hit.get("story_text", "") or ""
+                url = hit.get("url", "")
+                hn_url = f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
+                budget = _extract_budget(f"{title} {story_text}", "max")
+                prospects.append(_make_prospect(
+                    platform="hackernews",
+                    job_id=str(hit.get("objectID", uuid.uuid4())),
+                    title=title[:200],
+                    description=story_text[:2000] if story_text else title,
+                    budget_min=0,
+                    budget_max=budget,
+                    url=url or hn_url,
+                    skills=query or "hackernews",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("HackerNews search failed: %s", e)
+
+    return prospects
+
+
+@scanner("craigslist")
+async def _scan_craigslist(query: str, category: str, max_results: int) -> list[dict]:
+    regions = [category] if category else CRAIGSLIST_REGIONS[:3]
+    gig_sections = ["cpg", "wrg", "web"]
+    prospects = []
+
+    async with _scanner_client(timeout=15.0) as client:
+        for region in regions:
+            for section in gig_sections:
+                if len(prospects) >= max_results:
+                    break
+                try:
+                    rss_url = f"https://{region}.craigslist.org/search/{section}?format=rss"
+                    if query:
+                        rss_url += f"&query={query}"
+                    resp = await client.get(rss_url, follow_redirects=True)
+                    resp.raise_for_status()
+                    items = _parse_rss(resp.text)
+
+                    for item in items[:max_results]:
+                        title = item.get("title", "")
+                        desc = item.get("description", "")
+                        budget = _extract_budget(f"{title} {desc}", "max")
+                        link = item.get("link", "")
+                        prospects.append(_make_prospect(
+                            platform="craigslist",
+                            job_id=_url_to_id(link) if link else str(uuid.uuid4()),
+                            title=f"[{region}/{section}] {title}"[:200],
+                            description=desc[:2000],
+                            budget_min=0,
+                            budget_max=budget,
+                            url=link,
+                            skills=query or section,
+                        ))
+                        if len(prospects) >= max_results:
+                            break
+                except httpx.RequestError as e:
+                    logger.warning("Craigslist scan failed for %s/%s: %s", region, section, e)
+
+    return prospects
+
+
+@scanner("stackoverflow")
+async def _scan_stackoverflow(query: str, category: str, max_results: int) -> list[dict]:
+    prospects = []
+    try:
+        async with _scanner_client(timeout=15.0) as client:
+            rss_url = "https://stackoverflow.com/jobs/feed"
+            params = {}
+            if query:
+                params["searchTerm"] = query
+            resp = await client.get(rss_url, params=params, follow_redirects=True)
+            resp.raise_for_status()
+            items = _parse_rss(resp.text)
+
+            for item in items[:max_results]:
+                title = item.get("title", "")
+                desc = item.get("description", "")
+                link = item.get("link", item.get("guid", ""))
+                budget = _extract_budget(desc, "max")
+                prospects.append(_make_prospect(
+                    platform="stackoverflow",
+                    job_id=_url_to_id(link) if link else str(uuid.uuid4()),
+                    title=title[:200],
+                    description=desc[:2000],
+                    budget_min=0,
+                    budget_max=budget,
+                    url=link,
+                    skills=query or "stackoverflow",
+                ))
+    except httpx.RequestError as e:
+        logger.warning("StackOverflow jobs fetch failed: %s", e)
+
+    return prospects
+
+
+@scanner("custom_rss")
+async def _scan_custom_rss(query: str, category: str, max_results: int) -> list[dict]:
+    feeds = [category] if category else CUSTOM_RSS_FEEDS
+    if not feeds:
+        return []
+
+    prospects = []
+    async with _scanner_client(timeout=15.0) as client:
+        for feed_url in feeds:
+            if len(prospects) >= max_results:
+                break
+            try:
+                resp = await client.get(feed_url, follow_redirects=True)
+                resp.raise_for_status()
+                items = _parse_rss(resp.text)
+
+                for item in items[:max_results]:
+                    title = item.get("title", "")
+                    desc = item.get("description", "")
+                    if query and query.lower() not in f"{title} {desc}".lower():
+                        continue
+                    link = item.get("link", item.get("guid", ""))
+                    budget = _extract_budget(desc, "max")
+                    prospects.append(_make_prospect(
+                        platform="custom_rss",
+                        job_id=_url_to_id(link) if link else str(uuid.uuid4()),
+                        title=title[:200],
+                        description=desc[:2000],
+                        budget_min=0,
+                        budget_max=budget,
+                        url=link,
+                        skills=query or "custom_rss",
+                    ))
+                    if len(prospects) >= max_results:
+                        break
+            except httpx.RequestError as e:
+                logger.warning("Custom RSS fetch failed for %s: %s", feed_url, e)
+
+    return prospects
+
+
+# ---------------------------------------------------------------------------
+# Multi-scan: sweep all (or selected) platforms at once
+# ---------------------------------------------------------------------------
+
+class MultiScanRequest(BaseModel):
+    query: str = ""
+    platforms: list[str] = Field(default_factory=list)
+    max_per_platform: int = 10
+    category: str = ""
+
+
+@app.post("/scan/multi")
+async def multi_scan(req: MultiScanRequest):
+    target_platforms = req.platforms or list(SCANNERS.keys())
+    target_platforms = [p for p in target_platforms if p in SCANNERS]
+
+    now = time.monotonic()
+    results = {}
+    total_new = 0
+
+    async def _scan_one(platform: str):
+        nonlocal total_new
+        last = _last_scan_time.get(platform, 0)
+        if now - last < SCAN_COOLDOWN_SECONDS:
+            results[platform] = {"skipped": True, "reason": "cooldown"}
+            return
+
+        _last_scan_time[platform] = now
+        breaker = _get_breaker(platform)
+        scan_fn = SCANNERS[platform]
+        try:
+            prospects = await breaker.call(
+                scan_fn, req.query, req.category, req.max_per_platform,
+            )
+        except CircuitOpenError:
+            results[platform] = {"skipped": True, "reason": "circuit_open"}
+            return
+        except Exception as e:
+            results[platform] = {"error": str(e), "discovered": 0, "new": 0}
+            return
+
+        saved = 0
+        new_prospects = []
+        for p in prospects:
+            if await _save_prospect_dedup(p):
+                saved += 1
+                new_prospects.append(p)
+
+        high_value = [p for p in new_prospects if p.get("budget_max", 0) >= NOTIFY_MIN_BUDGET]
+        if high_value:
+            await _send_prospect_alert(high_value)
+
+        if AUTO_EVALUATE and new_prospects:
+            await _auto_evaluate_batch(new_prospects)
+
+        total_new += saved
+        results[platform] = {"discovered": len(prospects), "new": saved}
+
+    tasks = [_scan_one(p) for p in target_platforms]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    logger.info("Multi-scan complete: %d platforms, %d new prospects", len(target_platforms), total_new)
+    return {
+        "ok": 1,
+        "platforms_scanned": len(target_platforms),
+        "total_new": total_new,
+        "results": results,
+    }
+
+
+@app.get("/scan/keywords")
+async def get_scan_keywords():
+    return {
+        "keywords": SEARCH_KEYWORDS,
+        "reddit_subreddits": REDDIT_SUBREDDITS,
+        "craigslist_regions": CRAIGSLIST_REGIONS,
+        "custom_rss_feeds": CUSTOM_RSS_FEEDS,
+    }
 
 
 # ---------------------------------------------------------------------------

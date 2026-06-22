@@ -1,6 +1,7 @@
 """Tests for the prospector service — job discovery and prospect lifecycle."""
 
 import os
+import time
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -304,7 +305,7 @@ class TestPlatforms:
     async def test_platforms_list(self, client):
         resp = await client.get("/platforms")
         data = resp.json()
-        assert len(data) == 19
+        assert len(data) == 25
         names = [p["name"] for p in data]
         assert "upwork" in names
         assert "github_bounties" in names
@@ -316,6 +317,12 @@ class TestPlatforms:
         assert "algora" in names
         assert "onlydust" in names
         assert "freelancer" in names
+        assert "web_search" in names
+        assert "reddit" in names
+        assert "hackernews" in names
+        assert "craigslist" in names
+        assert "stackoverflow" in names
+        assert "custom_rss" in names
 
     async def test_all_platforms_have_scanners(self, client):
         resp = await client.get("/platforms")
@@ -330,3 +337,203 @@ class TestPlatforms:
             assert "status" in p
             assert "type" in p
             assert "description" in p
+
+
+SAMPLE_DDG_HTML = """
+<div class="result">
+  <a class="result__a" href="https://example.com/job1">Build me a dashboard</a>
+  <a class="result__snippet">Looking for developer to build React dashboard. Budget: $500</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://example.com/job2">Python automation needed</a>
+  <a class="result__snippet">Need a Python script to automate data pipeline. $200 budget</a>
+</div>
+"""
+
+SAMPLE_REDDIT_JSON = {
+    "data": {
+        "children": [
+            {
+                "data": {
+                    "id": "reddit1",
+                    "title": "[Hiring] Need a Python developer for web scraping project",
+                    "selftext": "Looking for someone to build a web scraper. Budget $300-$500.",
+                    "permalink": "/r/forhire/comments/abc123/hiring_python_developer/",
+                    "link_flair_text": "Hiring",
+                }
+            },
+            {
+                "data": {
+                    "id": "reddit2",
+                    "title": "[Hiring] React frontend developer needed",
+                    "selftext": "Building a SaaS dashboard. $1000 budget.",
+                    "permalink": "/r/forhire/comments/def456/hiring_react_developer/",
+                    "link_flair_text": "Hiring",
+                }
+            },
+        ]
+    }
+}
+
+SAMPLE_HN_JSON = {
+    "hits": [
+        {
+            "objectID": "hn123",
+            "title": "Ask HN: Freelance developer needed for startup",
+            "story_text": "We need a backend developer for our API. Budget $2000.",
+            "url": "",
+        },
+        {
+            "objectID": "hn456",
+            "title": "Show HN: Looking for contract developer",
+            "story_text": "",
+            "url": "https://example.com/job",
+        },
+    ]
+}
+
+
+class TestWebSearch:
+    async def test_scan_web_search(self, client):
+        mock_resp = MagicMock()
+        mock_resp.text = SAMPLE_DDG_HTML
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            resp = await client.post("/scan", json={"platform": "web_search", "query": "freelance developer"})
+
+        data = resp.json()
+        assert data["ok"] == 1
+        assert data["discovered"] >= 1
+
+    def test_parse_ddg_html(self):
+        results = prospector._parse_ddg_html(SAMPLE_DDG_HTML)
+        assert len(results) == 2
+        assert "dashboard" in results[0]["title"].lower()
+
+    def test_url_to_id_deterministic(self):
+        id1 = prospector._url_to_id("https://example.com/job1")
+        id2 = prospector._url_to_id("https://example.com/job1")
+        id3 = prospector._url_to_id("https://example.com/job2")
+        assert id1 == id2
+        assert id1 != id3
+
+
+class TestReddit:
+    async def test_scan_reddit(self, client):
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value=SAMPLE_REDDIT_JSON)
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            resp = await client.post("/scan", json={"platform": "reddit", "category": "forhire"})
+
+        data = resp.json()
+        assert data["ok"] == 1
+        assert data["discovered"] >= 1
+
+
+class TestHackerNews:
+    async def test_scan_hackernews(self, client):
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value=SAMPLE_HN_JSON)
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            resp = await client.post("/scan", json={"platform": "hackernews"})
+
+        data = resp.json()
+        assert data["ok"] == 1
+        assert data["discovered"] == 2
+
+
+class TestMultiScan:
+    async def test_multi_scan_selected_platforms(self, client):
+        mock_resp = MagicMock()
+        mock_resp.text = SAMPLE_RSS
+        mock_resp.json = MagicMock(return_value=SAMPLE_HN_JSON)
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            resp = await client.post("/scan/multi", json={
+                "platforms": ["upwork", "hackernews"],
+                "query": "python",
+                "max_per_platform": 5,
+            })
+
+        data = resp.json()
+        assert data["ok"] == 1
+        assert data["platforms_scanned"] == 2
+        assert "upwork" in data["results"]
+        assert "hackernews" in data["results"]
+
+    async def test_multi_scan_respects_cooldown(self, client):
+        prospector._last_scan_time["upwork"] = time.monotonic()
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value=SAMPLE_HN_JSON)
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+            resp = await client.post("/scan/multi", json={
+                "platforms": ["upwork", "hackernews"],
+                "max_per_platform": 5,
+            })
+
+        data = resp.json()
+        assert data["results"]["upwork"]["skipped"] is True
+        assert "hackernews" in data["results"]
+
+
+class TestScanKeywords:
+    async def test_get_keywords(self, client):
+        resp = await client.get("/scan/keywords")
+        data = resp.json()
+        assert "keywords" in data
+        assert len(data["keywords"]) > 0
+        assert "reddit_subreddits" in data
+        assert "craigslist_regions" in data
+        assert "custom_rss_feeds" in data
+
+
+class TestCustomRSS:
+    async def test_custom_rss_empty_feeds(self, client):
+        original = prospector.CUSTOM_RSS_FEEDS
+        prospector.CUSTOM_RSS_FEEDS = []
+        try:
+            resp = await client.post("/scan", json={"platform": "custom_rss"})
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["discovered"] == 0
+        finally:
+            prospector.CUSTOM_RSS_FEEDS = original
