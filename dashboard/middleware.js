@@ -7,6 +7,14 @@ const JWT_SECRET = new TextEncoder().encode(
 
 const PUBLIC_PATHS = ["/login", "/api/auth"];
 
+const ROLE_HIERARCHY = { admin: 3, operator: 2, viewer: 1 };
+
+const PROTECTED_ROUTES = {
+  "/admin": "admin",
+  "/api/admin": "admin",
+  "/api/audit": "operator",
+};
+
 export async function middleware(request) {
   const { pathname } = request.nextUrl;
 
@@ -28,8 +36,29 @@ export async function middleware(request) {
   }
 
   try {
-    await jwtVerify(token, JWT_SECRET);
-    return NextResponse.next();
+    const { payload } = await jwtVerify(token, JWT_SECRET);
+
+    const userRole = payload.role || "viewer";
+    for (const [route, requiredRole] of Object.entries(PROTECTED_ROUTES)) {
+      if (pathname.startsWith(route)) {
+        const userLevel = ROLE_HIERARCHY[userRole] || 0;
+        const requiredLevel = ROLE_HIERARCHY[requiredRole] || 3;
+        if (userLevel < requiredLevel) {
+          if (pathname.startsWith("/api/")) {
+            return NextResponse.json(
+              { error: "Insufficient permissions", required_role: requiredRole },
+              { status: 403 }
+            );
+          }
+          return NextResponse.redirect(new URL("/", request.url));
+        }
+      }
+    }
+
+    const response = NextResponse.next();
+    response.headers.set("X-User-Role", userRole);
+    response.headers.set("X-User-Id", payload.sub || "unknown");
+    return response;
   } catch {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Token expired" }, { status: 401 });

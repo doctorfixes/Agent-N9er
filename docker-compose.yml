@@ -384,6 +384,47 @@ services:
           memory: 256M
     restart: unless-stopped
 
+  enterprise-tools:
+    build:
+      context: .
+      dockerfile: enterprise_tools/Dockerfile
+    ports:
+      - "9300:9300"
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+      - NORMALIZATION_URL=http://normalization-service:8100
+      - RANKING_URL=http://ranking-engine:8200
+      - MARKETPLACE_URL=http://bidding-marketplace:8300
+      - EXECUTION_URL=http://agent-execution:8400
+      - REPUTATION_URL=http://reputation-ledger:8500
+      - RECURRING_URL=http://recurring-engine:8600
+      - EVALUATOR_URL=http://evaluator:8800
+      - PROSPECTOR_URL=http://prospector:8900
+      - BILLING_URL=http://billing:9200
+      - ENTERPRISE_DB_PATH=/data/enterprise.db
+      - AUDIT_DB_PATH=/data/audit.db
+      - VERIXIO_ENV=${VERIXIO_ENV:-development}
+      - API_KEY=${API_KEY:-}
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+      - PASSWORD_SALT=${PASSWORD_SALT:-n9er-enterprise-salt}
+    volumes:
+      - enterprise-data:/data
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9300/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
   dashboard:
     build: ./dashboard
     ports:
@@ -401,6 +442,7 @@ services:
       - PROSPECTOR_URL=http://prospector:8900
       - BILLING_URL=http://billing:9200
       - BROWSER_SERVICE_URL=http://browser-service:8001
+      - ENTERPRISE_URL=http://enterprise-tools:9300
       - JWT_SECRET=${JWT_SECRET:-change-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS:-admin}
@@ -415,6 +457,8 @@ services:
       evaluator:
         condition: service_healthy
       prospector:
+        condition: service_healthy
+      enterprise-tools:
         condition: service_healthy
     deploy:
       resources:
@@ -432,3 +476,4 @@ volumes:
   evaluator-data:
   prospector-data:
   billing-data:
+  enterprise-data:
