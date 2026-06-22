@@ -33,6 +33,7 @@ export default function RootLayout({ children }) {
             <a href="/agent-marketplace">Marketplace</a>
             <a href="/signal-intelligence">Signals</a>
             <a href="/integrations">Integrations</a>
+            <a href="/settings">Settings</a>
           </div>
           <LogoutButton />
         </nav>
