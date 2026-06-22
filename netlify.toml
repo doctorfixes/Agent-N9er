@@ -11,6 +11,7 @@
   package = "@netlify/plugin-nextjs"
 
 # Backend service URLs — set these in Netlify UI (Site > Environment variables)
+# Each service runs as a separate Railway service under api.agentn9ner.com
 # ORCHESTRATOR_URL = https://orchestrator-production.up.railway.app
 # NORMALIZATION_URL = https://normalization-production.up.railway.app
 # RANKING_URL = https://ranking-production.up.railway.app
@@ -21,14 +22,64 @@
 # EVALUATOR_URL = https://evaluator-production.up.railway.app
 # PROSPECTOR_URL = https://prospector-production.up.railway.app
 # BILLING_URL = https://billing-production.up.railway.app
+# MEMORY_URL = https://memory-production.up.railway.app
+# DELIVERY_URL = https://delivery-production.up.railway.app
 # JWT_SECRET = <generate a random 256-bit secret>
 # ADMIN_USER = admin
 # ADMIN_PASS = <strong password>
 # SERVICE_TOKEN = <shared token for inter-service auth>
 
+[[redirects]]
+  from = "/api/pipeline/*"
+  to = "${ORCHESTRATOR_URL}/pipeline/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
+[[redirects]]
+  from = "/api/scan/*"
+  to = "${ORCHESTRATOR_URL}/scan/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
+[[redirects]]
+  from = "/api/prospects/*"
+  to = "${PROSPECTOR_URL}/prospects/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
+[[redirects]]
+  from = "/api/invoices/*"
+  to = "${BILLING_URL}/invoices/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
+[[redirects]]
+  from = "/api/deliveries/*"
+  to = "${DELIVERY_URL}/deliveries/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
+[[redirects]]
+  from = "/api/insights/*"
+  to = "${MEMORY_URL}/insights/:splat"
+  status = 200
+  force = true
+  [redirects.headers]
+    X-Service-Token = "${SERVICE_TOKEN}"
+
 [[headers]]
   for = "/api/*"
   [headers.values]
-    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Origin = "https://agentn9ner.com"
     Access-Control-Allow-Methods = "GET, POST, OPTIONS"
     Access-Control-Allow-Headers = "Content-Type, Authorization"

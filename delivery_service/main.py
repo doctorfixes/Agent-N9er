@@ -30,7 +30,7 @@ SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
-FROM_EMAIL = os.getenv("DELIVERY_FROM_EMAIL", SMTP_USER or "delivery@agentn9er.com")
+FROM_EMAIL = os.getenv("DELIVERY_FROM_EMAIL", SMTP_USER or "delivery@agentn9ner.com")
 FROM_NAME = os.getenv("DELIVERY_FROM_NAME", "Agent N9er")
 
 

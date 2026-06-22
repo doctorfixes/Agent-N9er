@@ -45,7 +45,7 @@ SCAN_COOLDOWN_SECONDS = int(os.getenv("SCAN_COOLDOWN_SECONDS", "60"))
 
 _last_scan_time: dict[str, float] = {}
 
-SCANNER_USER_AGENT = "AgentN9er/1.0 (Prospect Scanner; +https://agentn9er.com)"
+SCANNER_USER_AGENT = "AgentN9er/1.0 (Prospect Scanner; +https://agentn9ner.com)"
 
 def _scanner_client(timeout: float = 15.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(

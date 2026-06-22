@@ -138,7 +138,7 @@ async def complete(
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://agentn9er.com",
+        "HTTP-Referer": "https://agentn9ner.com",
         "X-Title": "Agent N9er",
     }
 

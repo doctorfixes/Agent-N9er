@@ -51,7 +51,7 @@ class TestConfigProfiles:
         assert cfg.RATE_LIMIT_MAX_REQUESTS == 500
         assert cfg.LOG_LEVEL == "WARNING"
         assert cfg.DB_BACKEND == "postgres"
-        assert "agentn9er.com" in cfg.CORS_ORIGINS[0]
+        assert "agentn9ner.com" in cfg.CORS_ORIGINS[0]
 
     def test_env_var_overrides_profile(self):
         cfg = _reload_config(VERIXIO_ENV="production", MAX_RETRIES="10")
