@@ -1,7 +1,33 @@
+# byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# distribution / packaging
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# virtual environments
+.venv/
+venv/
+env/
+
+# test & coverage artefacts
 .pytest_cache/
-node_modules/
-.next/
+.coverage
+htmlcov/
+
+# editor directories
+.idea/
+.vscode/
+*.swp
+
+# environment and database
 .env
 *.db
+
+# node / web
+node_modules/
+.next/
