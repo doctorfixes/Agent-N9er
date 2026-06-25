@@ -27,6 +27,7 @@ htmlcov/
 # environment and database
 .env
 *.db
+secrets_vault.json
 
 # node / web
 node_modules/
