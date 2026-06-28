@@ -76,11 +76,264 @@ function ProposalModal({ prospect, onClose }) {
   );
 }
 
+function ThreadModal({ msg, onClose }) {
+  const [messages, setMessages] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [autoReplying, setAutoReplying] = useState(false);
+
+  const loadThread = async () => {
+    setLoading(true);
+    try {
+      const resp = await fetch(`/api/thread/${msg.thread_id}`);
+      const data = await resp.json();
+      setMessages(data.messages || []);
+    } catch (e) {
+      setMessages([]);
+    }
+    setLoading(false);
+  };
+
+  useState(() => { loadThread(); }, []);
+
+  const sendReply = async () => {
+    if (!replyText.trim()) return;
+    setSending(true);
+    try {
+      await fetch(`/api/thread/${msg.thread_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: replyText }),
+      });
+      setReplyText("");
+      await loadThread();
+    } catch (e) {
+      alert("Failed to send: " + e.message);
+    }
+    setSending(false);
+  };
+
+  const triggerAutoReply = async () => {
+    setAutoReplying(true);
+    try {
+      await fetch("/api/auto-reply/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: msg.thread_id }),
+      });
+      setTimeout(loadThread, 3000);
+    } catch (e) {
+      alert("Auto-reply failed: " + e.message);
+    }
+    setAutoReplying(false);
+  };
+
+  const freelancerUserId = null; // Will match from API
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content" style={{ maxWidth: 600, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-cyan)", fontWeight: 600 }}>
+            <span className="dot info" /> Thread with {msg.sender || "Unknown"}
+          </div>
+          <button className="cmd-btn sm" onClick={onClose}>Close</button>
+        </div>
+
+        {msg.prospect && (
+          <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--bg-input)", borderRadius: 4, border: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-primary)", fontWeight: 600 }}>{msg.prospect.title}</div>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+              Status: <span className={`badge ${msg.prospect.status}`} style={{ fontSize: 9, padding: "1px 6px" }}>{msg.prospect.status}</span>
+              {msg.prospect.quoted_price > 0 && ` // Bid: $${msg.prospect.quoted_price}`}
+            </div>
+          </div>
+        )}
+
+        <div style={{ flex: 1, overflowY: "auto", marginBottom: 12, padding: "8px 0" }}>
+          {loading && <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", textAlign: "center", padding: 20 }}>Loading messages...</div>}
+          {messages && messages.length === 0 && <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", textAlign: "center", padding: 20 }}>No messages in thread.</div>}
+          {messages && messages.map((m, i) => {
+            const isOurs = m.from_user && String(m.from_user) === (typeof window !== "undefined" ? localStorage.getItem("freelancer_user_id") : "");
+            return (
+              <div key={m.id || i} style={{
+                padding: "8px 12px", marginBottom: 6, borderRadius: 6,
+                maxWidth: "85%",
+                marginLeft: isOurs ? "auto" : 0,
+                marginRight: isOurs ? 0 : "auto",
+                background: isOurs ? "rgba(6,182,212,0.12)" : "var(--bg-input)",
+                border: `1px solid ${isOurs ? "rgba(6,182,212,0.25)" : "var(--border)"}`,
+              }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-primary)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                  {m.message}
+                </div>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-muted)", marginTop: 4 }}>
+                  {m.time_created ? new Date(m.time_created * 1000).toLocaleString() : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <button className="cmd-btn sm" onClick={triggerAutoReply} disabled={autoReplying}>
+            {autoReplying ? "..." : "Auto-Reply"}
+          </button>
+          <button className="cmd-btn sm" onClick={loadThread}>Refresh</button>
+        </div>
+
+        <div style={{ display: "flex", gap: 6 }}>
+          <textarea
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+            placeholder="Type a reply..."
+            style={{
+              flex: 1, padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: 11,
+              background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 4,
+              color: "var(--text-primary)", resize: "none", minHeight: 40, maxHeight: 80,
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendReply(); } }}
+          />
+          <button className="cmd-btn primary" onClick={sendReply} disabled={sending || !replyText.trim()}>
+            {sending ? "..." : "Send"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BidModal({ prospect, onClose, onBid }) {
+  const [bidAmount, setBidAmount] = useState(prospect.quoted_price || prospect.budget_min || 50);
+  const [period, setPeriod] = useState(7);
+  const [proposal, setProposal] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const generateProposal = async () => {
+    setGenerating(true);
+    try {
+      const resp = await fetch("/api/proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prospect_id: prospect.id,
+          title: prospect.title,
+          description: prospect.description || "",
+          platform: prospect.platform,
+          budget_max: prospect.budget_max || 0,
+          skills: prospect.skills || "",
+          tone: "professional",
+        }),
+      });
+      const data = await resp.json();
+      if (data.proposal) setProposal(data.proposal);
+    } catch (e) {
+      alert("Proposal generation failed: " + e.message);
+    }
+    setGenerating(false);
+  };
+
+  const submitBid = async () => {
+    setSubmitting(true);
+    try {
+      const resp = await fetch("/api/bid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prospect_id: prospect.id,
+          bid_amount: parseFloat(bidAmount),
+          period: parseInt(period),
+          milestone_percentage: 100,
+          description: proposal,
+        }),
+      });
+      const data = await resp.json();
+      setResult(data);
+      if (data.ok && onBid) onBid();
+    } catch (e) {
+      setResult({ error: e.message });
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content" style={{ maxWidth: 550 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-cyan)", fontWeight: 600 }}>
+            <span className="dot info" /> Place Bid
+          </div>
+          <button className="cmd-btn sm" onClick={onClose}>Close</button>
+        </div>
+
+        <div style={{ padding: "8px 12px", marginBottom: 16, background: "var(--bg-input)", borderRadius: 4, border: "1px solid var(--border)" }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>{prospect.title}</div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+            {prospect.platform?.toUpperCase()} // Budget: ${prospect.budget_min || 0} - ${prospect.budget_max || 0}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>BID AMOUNT ($)</label>
+            <input type="number" value={bidAmount} onChange={(e) => setBidAmount(e.target.value)}
+              style={{ width: "100%", padding: "6px 10px", fontFamily: "var(--font-mono)", fontSize: 12, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-primary)" }}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>PERIOD (DAYS)</label>
+            <input type="number" value={period} onChange={(e) => setPeriod(e.target.value)}
+              style={{ width: "100%", padding: "6px 10px", fontFamily: "var(--font-mono)", fontSize: 12, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-primary)" }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <label style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>PROPOSAL</label>
+            <button className="cmd-btn sm" onClick={generateProposal} disabled={generating}>
+              {generating ? "Generating..." : "AI Generate"}
+            </button>
+          </div>
+          <textarea value={proposal} onChange={(e) => setProposal(e.target.value)}
+            placeholder="Write your proposal or click AI Generate..."
+            style={{
+              width: "100%", minHeight: 120, padding: "8px 12px", fontFamily: "var(--font-mono)", fontSize: 11,
+              background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 4,
+              color: "var(--text-primary)", resize: "vertical", lineHeight: 1.6,
+            }}
+          />
+        </div>
+
+        {result && (
+          <div style={{
+            padding: "8px 12px", marginBottom: 12, borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 11,
+            background: result.error ? "rgba(239,68,68,0.1)" : "rgba(16,185,129,0.1)",
+            border: `1px solid ${result.error ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.3)"}`,
+            color: result.error ? "#f87171" : "#34d399",
+          }}>
+            {result.error ? `ERR: ${result.error}` : `BID PLACED // ID: ${result.bid_id || "OK"}`}
+          </div>
+        )}
+
+        <button className="cmd-btn primary" onClick={submitBid} disabled={submitting || !proposal.trim()}>
+          {submitting ? "Submitting..." : `Submit Bid — $${bidAmount}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function ProspectsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [proposalTarget, setProposalTarget] = useState(null);
+  const [threadTarget, setThreadTarget] = useState(null);
+  const [bidTarget, setBidTarget] = useState(null);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
@@ -200,8 +453,8 @@ export default function ProspectsPage() {
             <span className="dot info" /> Freelancer Messages ({messages.count})
           </div>
           {messages.messages.map((msg) => (
-            <div key={msg.thread_id} style={{
-              padding: "10px 14px", marginBottom: 6, borderRadius: 4,
+            <div key={msg.thread_id} onClick={() => setThreadTarget(msg)} style={{
+              padding: "10px 14px", marginBottom: 6, borderRadius: 4, cursor: "pointer",
               background: msg.is_read ? "var(--bg-input)" : "rgba(6,182,212,0.08)",
               border: `1px solid ${msg.is_read ? "var(--border)" : "rgba(6,182,212,0.25)"}`,
             }}>
@@ -250,8 +503,9 @@ export default function ProspectsPage() {
                 <td style={{ fontSize: 11, color: "var(--accent-cyan)" }}>{p.quoted_price > 0 ? `$${p.quoted_price}` : "---"}</td>
                 <td><span className={`badge ${p.status}`}>{p.status}</span></td>
                 <td style={{ fontSize: 10 }}>{p.applied_at ? new Date(p.applied_at).toLocaleDateString() : "---"}</td>
-                <td>
+                <td style={{ display: "flex", gap: 4 }}>
                   <button className="cmd-btn sm" onClick={() => setProposalTarget(p)}>Propose</button>
+                  <button className="cmd-btn sm primary" onClick={() => setBidTarget(p)}>Bid</button>
                 </td>
               </tr>
             )) : (
@@ -266,6 +520,8 @@ export default function ProspectsPage() {
       </div>
 
       {proposalTarget && <ProposalModal prospect={proposalTarget} onClose={() => setProposalTarget(null)} />}
+      {threadTarget && <ThreadModal msg={threadTarget} onClose={() => setThreadTarget(null)} />}
+      {bidTarget && <BidModal prospect={bidTarget} onClose={() => setBidTarget(null)} onBid={() => { setBidTarget(null); mutate(); }} />}
     </div>
   );
 }

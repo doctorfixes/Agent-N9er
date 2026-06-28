@@ -1061,6 +1061,66 @@ async def auto_reply_status():
     }
 
 
+@app.post("/auto-reply/trigger")
+async def trigger_auto_reply(body: dict):
+    """Manually trigger an auto-reply for a specific thread."""
+    thread_id = body.get("thread_id")
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="thread_id required")
+
+    svc = _svc_headers()
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            # Fetch thread info
+            msg_resp = await client.get(
+                f"{PROSPECTOR_URL}/freelancer/messages",
+                params={"unread_only": "false", "limit": 20},
+                headers=svc,
+            )
+            if msg_resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Failed to fetch messages")
+
+            target_msg = None
+            for msg in msg_resp.json().get("messages", []):
+                if msg.get("thread_id") == thread_id:
+                    target_msg = msg
+                    break
+
+            if not target_msg:
+                raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+            sender = target_msg.get("sender", "Unknown")
+            preview = (target_msg.get("last_message", "") or "")[:200]
+            prospect = target_msg.get("prospect")
+            title = prospect.get("title", "") if prospect else ""
+            status = prospect.get("status", "") if prospect else ""
+            quoted_price = prospect.get("quoted_price", 0) if prospect else 0
+            description = prospect.get("description", "") if prospect else ""
+            project_id = target_msg.get("project_id", "")
+
+            is_quote = _detect_quote_request(preview, status)
+
+            if is_quote:
+                await _generate_and_send_quote(
+                    client, svc, thread_id, sender, preview,
+                    title=title, status=status, description=description,
+                    project_id=project_id,
+                )
+            else:
+                await _auto_reply_to_message(
+                    client, svc, thread_id, sender, preview,
+                    title=title, status=status, quoted_price=quoted_price,
+                    project_id=project_id,
+                )
+
+            return {"ok": 1, "thread_id": thread_id, "type": "quote" if is_quote else "reply"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 async def health():
     async with _agents_lock:
