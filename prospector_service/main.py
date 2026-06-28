@@ -728,7 +728,7 @@ async def _scan_freelancer(query: str, category: str, max_results: int) -> list[
                 "compact": "true",
                 "limit": max_results,
                 "sort_field": "time_updated",
-                "project_types[]": "fixed",
+                "project_types[]": ["fixed", "hourly"],
                 "full_description": "true",
                 "job_details": "true",
                 "user_details": "true",

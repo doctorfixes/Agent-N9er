@@ -37,6 +37,8 @@ PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
+FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "true").lower() == "true"
+
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
@@ -491,6 +493,30 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                     prospect_result["quoted_price"] = quoted
                     prospect_result["estimated_cost"] = cost
                     prospect_result["complexity"] = evaluation.get("complexity", "")
+
+                    # 2b. Auto-bid on Freelancer prospects
+                    if prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and quoted > 0:
+                        try:
+                            bid_resp = await client.post(
+                                f"{PROSPECTOR_URL}/freelancer/bid",
+                                json={
+                                    "prospect_id": pid,
+                                    "bid_amount": quoted,
+                                    "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
+                                    "milestone_percentage": 100.0,
+                                    "description": "",
+                                },
+                                headers=svc,
+                            )
+                            if bid_resp.status_code == 200:
+                                bid_data = bid_resp.json()
+                                prospect_result["freelancer_bid_id"] = bid_data.get("bid_id")
+                                prospect_result["status"] = "applied"
+                                logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], quoted)
+                            else:
+                                logger.warning("Freelancer auto-bid failed for %s: %s", pid[:8], bid_resp.text)
+                        except httpx.RequestError as e:
+                            logger.warning("Freelancer auto-bid request failed for %s: %s", pid[:8], e)
 
                     # 3. Execute if auto_execute
                     if req.auto_execute:
