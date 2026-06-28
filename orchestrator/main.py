@@ -126,11 +126,17 @@ async def _persist_agent(agent_data: dict):
         await db.commit()
 
 
+AUTO_DISPATCH_ENABLED = os.getenv("AUTO_DISPATCH_ENABLED", "false").lower() == "true"
+DISPATCH_RATE_DELAY = int(os.getenv("DISPATCH_RATE_DELAY_SECONDS", "3"))
+
+
 async def _scan_loop():
     while True:
         try:
             await asyncio.sleep(SCAN_INTERVAL)
-            await _run_scan_cycle()
+            results = await _run_scan_cycle()
+            if AUTO_DISPATCH_ENABLED:
+                await _dispatch_cycle()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -171,6 +177,115 @@ async def _run_scan_cycle():
     return results
 
 
+async def _dispatch_cycle():
+    """Post-scan dispatch: evaluate discovered → generate proposals for approved → queue bids."""
+    svc = _svc_headers()
+    stats = {"evaluated": 0, "approved": 0, "proposals": 0, "bids_queued": 0, "errors": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            # 1. Fetch all discovered prospects
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "discovered", "limit": 50},
+                headers=svc,
+            )
+            resp.raise_for_status()
+            discovered = resp.json()
+
+            if not discovered:
+                logger.info("Dispatch: no discovered prospects to process")
+                return stats
+
+            logger.info("Dispatch: processing %d discovered prospects", len(discovered))
+
+            # 2. Evaluate each
+            for prospect in discovered:
+                pid = prospect["id"]
+                try:
+                    eval_resp = await client.post(
+                        f"{PROSPECTOR_URL}/prospects/{pid}/evaluate",
+                        headers=svc,
+                    )
+                    eval_resp.raise_for_status()
+                    eval_data = eval_resp.json()
+                    stats["evaluated"] += 1
+
+                    if eval_data.get("status") != "approved":
+                        logger.info("Dispatch: %s rejected (%s)", prospect["title"][:40],
+                                    eval_data.get("evaluation", {}).get("rejection_reason", "not viable"))
+                        continue
+
+                    stats["approved"] += 1
+                    evaluation = eval_data.get("evaluation", {})
+                    quoted_price = evaluation.get("quoted_price_usd", 0)
+
+                    # 3. Generate proposal
+                    proposal_text = ""
+                    try:
+                        prop_resp = await client.post(
+                            f"{EXECUTION_URL}/proposal",
+                            json={
+                                "prospect_id": pid,
+                                "title": prospect["title"],
+                                "description": prospect.get("description", ""),
+                                "platform": prospect.get("platform", ""),
+                                "budget_min": prospect.get("budget_min", 0),
+                                "budget_max": prospect.get("budget_max", 0),
+                                "skills": prospect.get("skills", ""),
+                            },
+                            headers=svc,
+                        )
+                        prop_resp.raise_for_status()
+                        prop_data = prop_resp.json()
+                        proposal_text = prop_data.get("proposal", "")
+                        stats["proposals"] += 1
+                    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                        logger.warning("Dispatch: proposal generation failed for %s: %s", pid[:8], e)
+                        proposal_text = f"Interested in \"{prospect['title']}\". Ready to deliver quality work within the specified timeline."
+
+                    # 4. Submit bid (goes through approval gate)
+                    if prospect.get("platform") == "freelancer" and prospect.get("platform_job_id"):
+                        try:
+                            bid_resp = await client.post(
+                                f"{PROSPECTOR_URL}/prospects/{pid}/bid",
+                                json={
+                                    "prospect_id": pid,
+                                    "amount": quoted_price if quoted_price > 0 else prospect.get("budget_min", 50),
+                                    "period": 7,
+                                    "description": proposal_text,
+                                },
+                                headers=svc,
+                            )
+                            bid_resp.raise_for_status()
+                            bid_data = bid_resp.json()
+                            stats["bids_queued"] += 1
+                            logger.info("Dispatch: bid queued for %s ($%.2f) — %s",
+                                        prospect["title"][:40], quoted_price,
+                                        bid_data.get("status", "unknown"))
+                        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                            logger.warning("Dispatch: bid submission failed for %s: %s", pid[:8], e)
+                            stats["errors"] += 1
+                    else:
+                        # Non-freelancer: just mark as approved, proposal ready
+                        logger.info("Dispatch: %s approved with proposal (non-freelancer, no auto-bid)",
+                                    prospect["title"][:40])
+
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    logger.warning("Dispatch: evaluation failed for %s: %s", pid[:8], e)
+                    stats["errors"] += 1
+
+                await asyncio.sleep(DISPATCH_RATE_DELAY)
+
+    except Exception as e:
+        logger.error("Dispatch cycle error: %s", e)
+        stats["errors"] += 1
+
+    logger.info("Dispatch complete: %s", stats)
+    _scan_state["last_dispatch"] = stats
+    return stats
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _scan_task
@@ -178,7 +293,8 @@ async def lifespan(app):
     await _load_agents()
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
-        logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
+        logger.info("Auto-scan enabled: interval=%ds, platforms=%s, auto_dispatch=%s",
+                     SCAN_INTERVAL, SCAN_PLATFORMS, AUTO_DISPATCH_ENABLED)
     yield
     if _scan_task:
         _scan_task.cancel()
@@ -267,7 +383,27 @@ async def trigger_scan():
     if _scan_state["running"]:
         return {"ok": 0, "detail": "Scan already in progress"}
     results = await _run_scan_cycle()
+    if AUTO_DISPATCH_ENABLED:
+        dispatch_stats = await _dispatch_cycle()
+        return {"ok": 1, "results": results, "dispatch": dispatch_stats, "scan_state": _scan_state}
     return {"ok": 1, "results": results, "scan_state": _scan_state}
+
+
+@app.post("/dispatch")
+async def trigger_dispatch():
+    """Manually trigger dispatch: evaluate discovered prospects, generate proposals, queue bids."""
+    stats = await _dispatch_cycle()
+    return {"ok": 1, "dispatch": stats, "scan_state": _scan_state}
+
+
+@app.get("/dispatch/status")
+async def dispatch_status():
+    return {
+        "auto_dispatch_enabled": AUTO_DISPATCH_ENABLED,
+        "auto_scan_enabled": AUTO_SCAN_ENABLED,
+        "last_dispatch": _scan_state.get("last_dispatch"),
+        **_scan_state,
+    }
 
 
 @app.post("/pipeline")

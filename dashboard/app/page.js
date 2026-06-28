@@ -128,6 +128,29 @@ export default function MissionControl() {
     }
   };
 
+  const triggerDispatch = async () => {
+    setDispatching(true);
+    addActivity("Dispatch: evaluating discovered prospects...", "info");
+    try {
+      const resp = await fetch("/api/dispatch", { method: "POST" });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
+      if (data.error) {
+        addActivity(`Dispatch failed: ${data.error}`, "error");
+      } else {
+        const d = data.dispatch || {};
+        addActivity(
+          `Dispatch complete: ${d.evaluated || 0} evaluated, ${d.approved || 0} approved, ${d.proposals || 0} proposals, ${d.bids_queued || 0} bids queued`,
+          d.bids_queued > 0 ? "success" : "info"
+        );
+      }
+    } catch (e) {
+      addActivity(`Dispatch failed: ${e.message}`, "error");
+    }
+    setDispatching(false);
+  };
+
   return (
     <div>
       <div className="metric-grid" style={{ marginBottom: 16 }}>
@@ -276,15 +299,21 @@ export default function MissionControl() {
           )}
         </Panel>
 
-        <Panel title="Scan Status" dot={scanState?.running ? "warn" : ""} actions={
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: scanState?.auto_scan_enabled ? "var(--accent-green)" : "var(--text-muted)" }}>
-            {scanState?.auto_scan_enabled ? "AUTO" : "MANUAL"}
-          </span>
+        <Panel title="Scan & Dispatch" dot={scanState?.running ? "warn" : ""} actions={
+          <>
+            <button className="cmd-btn sm primary" onClick={triggerDispatch} disabled={dispatching}>
+              {dispatching ? ">>>" : "Dispatch"}
+            </button>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: scanState?.auto_scan_enabled ? "var(--accent-green)" : "var(--text-muted)" }}>
+              {scanState?.auto_scan_enabled ? "AUTO" : "MANUAL"}
+            </span>
+          </>
         }>
-          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
             <Metric label="Total Scans" value={scanState?.total_scans ?? 0} color="blue" />
             <Metric label="Discovered" value={scanState?.total_discovered ?? 0} color="green" />
             <Metric label="Platforms" value={scanState?.platforms?.length ?? 0} color="cyan" />
+            <Metric label="Bids Queued" value={scanState?.last_dispatch?.bids_queued ?? 0} color="purple" sub={scanState?.last_dispatch ? `${scanState.last_dispatch.approved || 0} approved` : "---"} />
           </div>
           {scanState?.last_scan_at && (
             <div style={{ marginTop: 10, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
