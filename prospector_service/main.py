@@ -1703,7 +1703,7 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
         async with httpx.AsyncClient(timeout=15.0) as client:
             params = {
                 "limit": limit,
-                "compact": "true",
+                "last_message": "true",
                 "message_context_details": "true",
                 "user_details": "true",
             }
@@ -1721,15 +1721,16 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
             users = data.get("users", {})
 
             messages = []
-            for thread in threads:
-                thread_id = thread.get("id")
-                context = thread.get("context", {})
+            for thread_wrapper in threads:
+                thread_id = thread_wrapper.get("id")
+                inner = thread_wrapper.get("thread") or thread_wrapper
+                context = inner.get("context") or thread_wrapper.get("context") or {}
                 context_type = context.get("type", "")
                 project_id = None
                 if context_type == "project":
                     project_id = str(context.get("id", ""))
 
-                members = thread.get("members", [])
+                members = inner.get("members") or thread_wrapper.get("members") or []
                 other_members = [
                     m for m in members
                     if str(m) != str(FREELANCER_USER_ID)
@@ -1737,13 +1738,17 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                 sender_id = other_members[0] if other_members else (members[0] if members else None)
                 sender_name = ""
                 if sender_id:
-                    for uid_key in [str(sender_id), int(sender_id) if str(sender_id).isdigit() else None]:
-                        if uid_key is not None and uid_key in users:
-                            u = users[uid_key]
-                            sender_name = u.get("display_name") or u.get("public_name") or u.get("username") or ""
-                            break
+                    uid_str = str(sender_id)
+                    if uid_str in users:
+                        u = users[uid_str]
+                        sender_name = u.get("public_name") or u.get("display_name") or u.get("username") or ""
                     if not sender_name:
-                        sender_name = thread.get("owner", {}).get("display_name") or thread.get("owner", {}).get("username") or f"User#{sender_id}"
+                        owner_id = inner.get("owner")
+                        if owner_id and str(owner_id) in users:
+                            u = users[str(owner_id)]
+                            sender_name = u.get("public_name") or u.get("display_name") or u.get("username") or ""
+                    if not sender_name:
+                        sender_name = f"User#{sender_id}"
 
                 prospect = None
                 if project_id:
@@ -1757,7 +1762,7 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                         if row:
                             prospect = dict(row)
 
-                last_msg_raw = thread.get("last_message") or thread.get("message") or ""
+                last_msg_raw = thread_wrapper.get("last_message") or inner.get("message") or ""
                 if isinstance(last_msg_raw, dict):
                     last_msg_text = last_msg_raw.get("message", "") or last_msg_raw.get("text", "") or last_msg_raw.get("snippet", "")
                     last_msg_from = last_msg_raw.get("from_user")
@@ -1770,11 +1775,11 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                     "project_id": project_id,
                     "sender": sender_name,
                     "sender_id": sender_id,
-                    "message_count": thread.get("message_count", 0),
-                    "is_read": thread.get("is_read", True),
+                    "message_count": thread_wrapper.get("message_count") or inner.get("message_count") or 0,
+                    "is_read": thread_wrapper.get("is_read", True),
                     "last_message": last_msg_text,
                     "last_message_from": last_msg_from,
-                    "last_message_time": thread.get("time_updated"),
+                    "last_message_time": thread_wrapper.get("time_updated"),
                     "context_type": context_type,
                     "prospect": prospect,
                 })
