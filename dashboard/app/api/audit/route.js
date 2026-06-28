@@ -10,7 +10,7 @@ export async function GET(request) {
     if (!params.has("limit")) params.set("limit", "50");
 
     const resp = await fetch(`${ENTERPRISE_URL}/audit/logs?${params.toString()}`);
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data);
   } catch {
     return Response.json({ total: 0, entries: [] }, { status: 502 });

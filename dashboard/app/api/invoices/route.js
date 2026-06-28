@@ -12,6 +12,6 @@ export async function GET(request) {
   const status = searchParams.get("status");
   const qs = status ? `?status=${status}` : "";
   const resp = await fetch(`${BILLING_URL}/invoices${qs}`, { headers: svcHeaders() });
-  const data = await resp.json();
+  let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
   return Response.json(data);
 }

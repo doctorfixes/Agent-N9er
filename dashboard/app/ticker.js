@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 export default function TickerBar() {
   const { data: health } = useSWR("/api/health", fetcher, { refreshInterval: 15000 });

@@ -7,6 +7,6 @@ export async function GET(request) {
   const headers = { "Content-Type": "application/json" };
   if (SERVICE_TOKEN) headers["X-Service-Token"] = SERVICE_TOKEN;
   const resp = await fetch(`${EXECUTION_URL}/analytics?days=${days}`, { headers });
-  const data = await resp.json();
+  let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
   return Response.json(data, { status: resp.status });
 }

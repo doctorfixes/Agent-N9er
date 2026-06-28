@@ -15,7 +15,7 @@ export async function POST(request) {
       headers: svcHeaders(),
       body: JSON.stringify(body),
     });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data);
   } catch {
     return Response.json({ error: "Pipeline unreachable" }, { status: 502 });

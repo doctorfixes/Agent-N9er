@@ -15,7 +15,7 @@ const SERVICES = [
 async function fetchService(svc) {
   try {
     const resp = await fetch(svc.url, { signal: AbortSignal.timeout(3000) });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return { name: svc.name, online: true, ...data };
   } catch {
     return { name: svc.name, online: false };
@@ -25,10 +25,10 @@ async function fetchService(svc) {
 export async function GET() {
   const [services, watchersRes, tasksRes, agentsRes, signalsRes] = await Promise.allSettled([
     Promise.all(SERVICES.map(fetchService)),
-    fetch(`${BROWSER_SERVICE_URL}/watchers`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
-    fetch(`${MARKETPLACE_URL}/feed`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
-    fetch(`${REPUTATION_URL}/ledger`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
-    fetch(`${BROWSER_SERVICE_URL}/signals`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
+    fetch(`${BROWSER_SERVICE_URL}/watchers`, { signal: AbortSignal.timeout(3000) }).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return {}; } }),
+    fetch(`${MARKETPLACE_URL}/feed`, { signal: AbortSignal.timeout(3000) }).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return {}; } }),
+    fetch(`${REPUTATION_URL}/ledger`, { signal: AbortSignal.timeout(3000) }).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return {}; } }),
+    fetch(`${BROWSER_SERVICE_URL}/signals`, { signal: AbortSignal.timeout(3000) }).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return {}; } }),
   ]);
 
   const watchers = watchersRes.status === "fulfilled" ? watchersRes.value : { available: [], active: [] };

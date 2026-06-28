@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 function ScoreBar({ score, max }) {
   const pct = max > 0 ? Math.min(100, (score / max) * 100) : 0;

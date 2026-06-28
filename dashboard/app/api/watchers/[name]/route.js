@@ -8,7 +8,7 @@ export async function POST(request, { params }) {
     const resp = await fetch(`${BROWSER_SERVICE_URL}/watchers/${name}/${action}`, {
       method: "POST",
     });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data, { status: resp.ok ? 200 : resp.status });
   } catch {
     return Response.json({ error: "Browser service unreachable" }, { status: 502 });
