@@ -5,6 +5,7 @@ COPY orchestrator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ ./shared/
 COPY orchestrator/main.py .
+RUN mkdir -p /data && chown app:app /data
 USER app
 EXPOSE 9000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')" || exit 1
