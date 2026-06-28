@@ -1613,12 +1613,25 @@ async def deliver_freelancer_milestone(req: DeliverRequest):
             milestone = milestones[0]
             milestone_id = milestone.get("id")
 
+            reason_text = deliverable[:5000] if len(deliverable) <= 5000 else deliverable[:4900] + "\n\n[Full deliverable sent as thread message]"
             submit_resp = await client.put(
                 f"{FREELANCER_API_BASE}/projects/0.1/milestones/{milestone_id}/",
                 headers=_freelancer_headers(),
-                json={"action": "request_release", "reason": deliverable[:5000]},
+                json={"action": "request_release", "reason": reason_text},
             )
             submit_resp.raise_for_status()
+
+            if len(deliverable) > 5000:
+                thread_id = prospect.get("thread_id")
+                if thread_id:
+                    for i in range(0, len(deliverable), 4000):
+                        chunk = deliverable[i:i+4000]
+                        part_label = f"[Part {i//4000 + 1}] " if len(deliverable) > 4000 else ""
+                        await client.post(
+                            f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                            headers=_freelancer_headers(),
+                            json={"message": f"{part_label}{chunk}"},
+                        )
 
     except httpx.HTTPStatusError as e:
         error_msg = str(e)

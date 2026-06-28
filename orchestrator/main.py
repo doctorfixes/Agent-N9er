@@ -449,12 +449,15 @@ async def _check_awarded_and_execute(svc=None):
                                 "agent_id": "agent-n9er-primary",
                                 "objective": prospect.get("title", ""),
                                 "description": prospect.get("description", ""),
-                                "complexity": "moderate",
+                                "complexity": prospect.get("complexity", "moderate"),
                                 "confidence": 0.8,
-                                "tier": "deepseek_flash",
+                                "tier": prospect.get("tier", "standard"),
+                                "platform": prospect.get("platform", "freelancer"),
+                                "budget": prospect.get("quoted_price", 0),
+                                "client": prospect.get("client_username", ""),
                             },
                             headers=svc,
-                            timeout=60.0,
+                            timeout=120.0,
                         )
 
                         if exec_resp.status_code == 200 and exec_resp.json().get("success"):
@@ -480,25 +483,44 @@ async def _check_awarded_and_execute(svc=None):
                             deliverable = add_transparency_notice(deliverable, "markdown")
 
                             try:
-                                await client.post(
+                                deliver_resp = await client.post(
                                     f"{PROSPECTOR_URL}/freelancer/deliver-milestone",
-                                    json={"prospect_id": pid, "deliverable": deliverable[:5000]},
+                                    json={"prospect_id": pid, "deliverable": deliverable},
                                     headers=svc,
+                                    timeout=30.0,
                                 )
+                                if deliver_resp.status_code == 200:
+                                    await telegram_notify(
+                                        f"WORK DELIVERED\n"
+                                        f"Project: {title}\n"
+                                        f"Awaiting payment release."
+                                    )
+                                    logger.info("Executed and delivered: %s", title[:60])
+                                else:
+                                    logger.error("Delivery API returned %s for %s", deliver_resp.status_code, pid[:8])
+                                    await client.patch(
+                                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                                        json={"status": "hired"},
+                                        headers=svc,
+                                    )
+                                    await telegram_notify(
+                                        f"DELIVERY FAILED\n"
+                                        f"Project: {title}\n"
+                                        f"Will retry next cycle."
+                                    )
                             except Exception as de:
                                 logger.warning("Milestone delivery failed for %s: %s", pid[:8], de)
                                 await client.patch(
                                     f"{PROSPECTOR_URL}/prospects/{pid}",
-                                    json={"status": "delivered"},
+                                    json={"status": "hired"},
                                     headers=svc,
                                 )
-
-                            await telegram_notify(
-                                f"WORK DELIVERED\n"
-                                f"Project: {title}\n"
-                                f"Awaiting payment release."
-                            )
-                            logger.info("Executed and delivered: %s", title[:60])
+                                await telegram_notify(
+                                    f"DELIVERY ERROR\n"
+                                    f"Project: {title}\n"
+                                    f"Error: {str(de)[:100]}\n"
+                                    f"Will retry next cycle."
+                                )
                         else:
                             logger.warning("Execution failed for %s", pid[:8])
                             await telegram_notify(
@@ -520,12 +542,32 @@ async def _check_awarded_and_execute(svc=None):
             if pay_resp.status_code == 200:
                 payments = pay_resp.json().get("paid", [])
                 for payment in payments:
+                    amount = payment.get("amount_paid", 0)
+                    title_text = payment.get("title", "Unknown")
                     await telegram_notify(
                         f"PAYMENT RECEIVED!\n"
-                        f"Project: {payment.get('title', 'Unknown')}\n"
-                        f"Amount: ${payment.get('amount_paid', 0):.2f}"
+                        f"Project: {title_text}\n"
+                        f"Amount: ${amount:.2f}"
                     )
-                    logger.info("Payment received for %s: $%.2f", payment.get("title", "")[:40], payment.get("amount_paid", 0))
+                    logger.info("Payment received for %s: $%.2f", title_text[:40], amount)
+
+                    try:
+                        await client.post(
+                            f"{BILLING_URL}/invoices",
+                            json={
+                                "prospect_id": payment.get("prospect_id", ""),
+                                "client_email": "",
+                                "description": f"Freelancer project: {title_text}",
+                                "amount_usd": amount,
+                                "token_cost_usd": 0,
+                                "platform": "freelancer",
+                                "metadata": {"project_id": payment.get("project_id", "")},
+                            },
+                            headers=svc,
+                        )
+                        logger.info("Invoice created for %s", title_text[:40])
+                    except Exception as inv_err:
+                        logger.warning("Invoice creation failed for %s: %s", title_text[:40], inv_err)
         except Exception as e:
             logger.warning("Payment check failed: %s", e)
 
