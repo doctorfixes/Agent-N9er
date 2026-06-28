@@ -624,3 +624,127 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
         results["executed"], results["invoiced"], results["estimated_profit"],
     )
     return results
+
+
+class ExecuteWorkRequest(BaseModel):
+    status_filter: str = "executing"
+    prospect_id: str = ""
+    client_email: str = ""
+
+
+@app.post("/prospects/execute-work")
+async def execute_prospect_work(req: ExecuteWorkRequest):
+    """Generate deliverables for prospects in 'executing' (or other) status."""
+    svc = _svc_headers()
+    results = {
+        "total": 0,
+        "completed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_cost_usd": 0,
+        "deliverables": [],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            if req.prospect_id:
+                prospect_resp = await client.get(
+                    f"{PROSPECTOR_URL}/prospects/{req.prospect_id}",
+                    headers=svc,
+                )
+                prospect_resp.raise_for_status()
+                prospects = [prospect_resp.json()]
+            else:
+                prospects_resp = await client.get(
+                    f"{PROSPECTOR_URL}/prospects",
+                    params={"status": req.status_filter, "limit": 50},
+                    headers=svc,
+                )
+                prospects_resp.raise_for_status()
+                prospects = prospects_resp.json()
+            results["total"] = len(prospects)
+
+            if not prospects:
+                return {**results, "detail": f"No prospects with status '{req.status_filter}'"}
+
+            for prospect in prospects:
+                pid = prospect["id"]
+                entry = {
+                    "prospect_id": pid,
+                    "title": prospect["title"],
+                    "platform": prospect.get("platform", "unknown"),
+                }
+
+                try:
+                    exec_resp = await client.post(
+                        f"{EXECUTION_URL}/execute",
+                        json={
+                            "task_id": pid,
+                            "agent_id": "agent-n9er-primary",
+                            "confidence": 0.85,
+                            "objective": prospect["title"],
+                            "description": prospect.get("description", ""),
+                            "complexity": "moderate",
+                        },
+                        headers=svc,
+                    )
+                    exec_resp.raise_for_status()
+                    exec_data = exec_resp.json()
+
+                    if exec_data.get("success"):
+                        results["completed"] += 1
+                        cost = exec_data.get("cost_usd", 0)
+                        results["total_cost_usd"] += cost
+
+                        await client.patch(
+                            f"{PROSPECTOR_URL}/prospects/{pid}",
+                            json={"status": "delivered"},
+                            headers=svc,
+                        )
+
+                        entry["status"] = "delivered"
+                        entry["mode"] = exec_data.get("mode", "unknown")
+                        entry["model"] = exec_data.get("model", "")
+                        entry["cost_usd"] = cost
+                        entry["duration"] = exec_data.get("duration", 0)
+                        entry["output_preview"] = exec_data.get("output_preview", "")[:200]
+
+                        quoted = prospect.get("quoted_price", 0) or prospect.get("budget_min", 0)
+                        if req.client_email and quoted > 0:
+                            try:
+                                await client.post(
+                                    f"{BILLING_URL}/invoices",
+                                    json={
+                                        "prospect_id": pid,
+                                        "client_email": req.client_email,
+                                        "description": prospect["title"],
+                                        "amount_usd": quoted,
+                                        "token_cost_usd": cost,
+                                        "platform": prospect.get("platform", ""),
+                                    },
+                                    headers=svc,
+                                )
+                                entry["invoiced"] = True
+                            except httpx.RequestError:
+                                entry["invoiced"] = False
+                    else:
+                        results["failed"] += 1
+                        entry["status"] = "execution_failed"
+                        entry["error"] = exec_data.get("error", "LLM returned incomplete response")
+
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    results["failed"] += 1
+                    entry["status"] = "error"
+                    entry["error"] = str(e)
+
+                results["deliverables"].append(entry)
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Service unreachable: {e}")
+
+    results["total_cost_usd"] = round(results["total_cost_usd"], 4)
+    logger.info(
+        "Execute work: total=%d completed=%d failed=%d cost=$%.4f",
+        results["total"], results["completed"], results["failed"], results["total_cost_usd"],
+    )
+    return results
