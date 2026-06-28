@@ -87,6 +87,7 @@ export default function ProspectsPage() {
   const { data: platforms } = useSWR("/api/prospects/platforms", fetcher);
   const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
   const { data: messages } = useSWR("/api/messages?limit=10", fetcher, { refreshInterval: 30000 });
+  const { data: autoReply } = useSWR("/api/auto-reply", fetcher, { refreshInterval: 15000 });
 
   const handleScan = async (platform) => {
     setScanning(true);
@@ -155,6 +156,13 @@ export default function ProspectsPage() {
         </div>
       )}
 
+      {autoReply && (
+        <div style={{ padding: "6px 14px", marginBottom: 12, borderRadius: 4, background: autoReply.enabled ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)", border: `1px solid ${autoReply.enabled ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)"}`, fontFamily: "var(--font-mono)", fontSize: 10, color: autoReply.enabled ? "#34d399" : "#f87171", display: "flex", justifyContent: "space-between" }}>
+          <span>AUTO-REPLY: {autoReply.enabled ? "ON" : "OFF"} // DELAY: {autoReply.delay_seconds}s // LIMIT: {autoReply.max_per_thread_hour}/hr // TELEGRAM: {autoReply.telegram_commands ? "ON" : "OFF"}</span>
+          <span>PENDING: {autoReply.pending_replies} // THREADS: {autoReply.active_threads} // RATE-LIMITED: {autoReply.rate_limited_threads}</span>
+        </div>
+      )}
+
       {scanResult && (
         <div style={{
           padding: "10px 14px", marginBottom: 12, borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12,
@@ -173,6 +181,8 @@ export default function ProspectsPage() {
         <div className="metric red"><div className="metric-label">Rejected</div><div className="metric-value">{stats?.by_status?.rejected ?? 0}</div></div>
         <div className="metric blue"><div className="metric-label">Executing</div><div className="metric-value">{stats?.by_status?.executing ?? 0}</div></div>
         <div className="metric green"><div className="metric-label">Delivered</div><div className="metric-value">{stats?.by_status?.delivered ?? 0}</div></div>
+        <div className="metric green"><div className="metric-label">Hired</div><div className="metric-value">{stats?.by_status?.hired ?? 0}</div></div>
+        <div className="metric green"><div className="metric-label">Paid</div><div className="metric-value">{stats?.by_status?.paid ?? 0}</div></div>
         <div className="metric amber"><div className="metric-label">Revenue</div><div className="metric-value">${stats?.revenue ?? 0}</div></div>
       </div>
 

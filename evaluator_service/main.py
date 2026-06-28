@@ -132,7 +132,7 @@ def compute_profit_efficiency(quoted: float, cost: float, budget_max: float) -> 
     margin = (quoted - cost) / quoted
     budget_fit = 1.0
     if budget_max > 0:
-        budget_fit = min(1.0, quoted / budget_max) if quoted <= budget_max else max(0.0, 1.0 - (quoted - budget_max) / budget_max)
+        budget_fit = min(1.0, quoted / budget_max) if quoted <= budget_max else max(0.0, 1.0 - (quoted - budget_max) / quoted)
     return round(margin * budget_fit, 3)
 
 

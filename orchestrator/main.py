@@ -3,7 +3,7 @@ import sys
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +54,7 @@ TELEGRAM_COMMAND_ENABLED = os.getenv("TELEGRAM_COMMAND_ENABLED", "true").lower()
 
 _reply_tracker: dict[int, list[float]] = {}
 _pending_replies: dict[int, dict] = {}
+_pending_replies_lock = asyncio.Lock()
 _telegram_poll_task: asyncio.Task | None = None
 _last_telegram_update_id = 0
 
@@ -78,18 +79,6 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
 SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,algora,topcoder").split(",")
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
 SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
-
-app = FastAPI(title="Agent N9er Orchestrator")
-
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware, max_requests=200, window_seconds=60)
-app.add_middleware(APIKeyMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
 
 registered_agents = {}
 _agents_lock = asyncio.Lock()
@@ -264,7 +253,7 @@ async def _auto_evaluate_and_bid(svc=None):
             await telegram_notify(f"AUTO-BID PAUSED\nMonthly bid limit reached: {bids_this_month}/{FREELANCER_MAX_BIDS_PER_MONTH}")
             return 0
 
-        hour_ago = (now - __import__("datetime").timedelta(hours=1)).isoformat()
+        hour_ago = (now - timedelta(hours=1)).isoformat()
         bids_this_hour = 0
         if applied_resp.status_code == 200:
             for p in applied_resp.json():
@@ -557,6 +546,35 @@ def _record_reply(thread_id: int):
     _reply_tracker.setdefault(thread_id, []).append(time.time())
 
 
+async def _delayed_reply(thread_id: int, reply_data: dict, svc: dict):
+    """Sleep then send an auto-reply if it hasn't been overridden."""
+    await asyncio.sleep(AUTO_REPLY_DELAY_SECONDS)
+
+    async with _pending_replies_lock:
+        if thread_id not in _pending_replies:
+            logger.info("Reply for thread %s was overridden or skipped", thread_id)
+            return
+        del _pending_replies[thread_id]
+
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        if reply_data.get("is_quote_request"):
+            await _generate_and_send_quote(
+                client, svc, thread_id, reply_data["sender"],
+                reply_data["client_message"],
+                title=reply_data["title"], status=reply_data["status"],
+                description=reply_data["description"],
+                project_id=reply_data["project_id"],
+            )
+        else:
+            await _auto_reply_to_message(
+                client, svc, thread_id, reply_data["sender"],
+                reply_data["client_message"],
+                title=reply_data["title"], status=reply_data["status"],
+                quoted_price=reply_data["quoted_price"],
+                project_id=reply_data["project_id"],
+            )
+
+
 async def _check_freelancer_messages(svc=None):
     """Poll Freelancer messenger for unread messages, auto-reply when appropriate."""
     if svc is None:
@@ -632,7 +650,8 @@ async def _check_freelancer_messages(svc=None):
                         "project_id": project_id, "description": description,
                         "is_quote_request": is_quote_request,
                     }
-                    _pending_replies[thread_id] = reply_data
+                    async with _pending_replies_lock:
+                        _pending_replies[thread_id] = reply_data
 
                     await telegram_notify(
                         f"PENDING AUTO-REPLY (sends in {AUTO_REPLY_DELAY_SECONDS}s)\n"
@@ -644,12 +663,8 @@ async def _check_freelancer_messages(svc=None):
                         f"  /send {thread_id}  (send immediately)"
                     )
 
-                    await asyncio.sleep(AUTO_REPLY_DELAY_SECONDS)
-
-                    if thread_id not in _pending_replies:
-                        logger.info("Reply for thread %s was overridden or skipped", thread_id)
-                        continue
-                    del _pending_replies[thread_id]
+                    asyncio.create_task(_delayed_reply(thread_id, reply_data, svc))
+                    continue
 
                 if is_quote_request:
                     await _generate_and_send_quote(
@@ -924,8 +939,11 @@ async def _handle_telegram_command(text: str):
     if override_match:
         thread_id = int(override_match.group(1))
         custom_message = override_match.group(2).strip()
-        if thread_id in _pending_replies:
-            del _pending_replies[thread_id]
+        async with _pending_replies_lock:
+            found = thread_id in _pending_replies
+            if found:
+                del _pending_replies[thread_id]
+        if found:
             svc = _svc_headers()
             async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
                 send_resp = await client.post(
@@ -945,8 +963,11 @@ async def _handle_telegram_command(text: str):
     skip_match = re.match(r"/skip\s+(\d+)", text)
     if skip_match:
         thread_id = int(skip_match.group(1))
-        if thread_id in _pending_replies:
-            del _pending_replies[thread_id]
+        async with _pending_replies_lock:
+            found = thread_id in _pending_replies
+            if found:
+                del _pending_replies[thread_id]
+        if found:
             await telegram_notify(f"Skipped auto-reply for thread {thread_id}")
         else:
             await telegram_notify(f"No pending reply for thread {thread_id}")
@@ -955,8 +976,9 @@ async def _handle_telegram_command(text: str):
     send_match = re.match(r"/send\s+(\d+)", text)
     if send_match:
         thread_id = int(send_match.group(1))
-        if thread_id in _pending_replies:
-            reply_data = _pending_replies.pop(thread_id)
+        async with _pending_replies_lock:
+            reply_data = _pending_replies.pop(thread_id, None)
+        if reply_data is not None:
             svc = _svc_headers()
             async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
                 if reply_data.get("is_quote_request"):
@@ -1024,6 +1046,19 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.get("/auto-reply/status")
+async def auto_reply_status():
+    return {
+        "enabled": AUTO_REPLY_ENABLED,
+        "delay_seconds": AUTO_REPLY_DELAY_SECONDS,
+        "max_per_thread_hour": AUTO_REPLY_MAX_PER_THREAD_HOUR,
+        "telegram_commands": TELEGRAM_COMMAND_ENABLED,
+        "pending_replies": len(_pending_replies),
+        "active_threads": len(_reply_tracker),
+        "rate_limited_threads": sum(1 for t in _reply_tracker if _is_rate_limited(t)),
+    }
 
 
 @app.get("/health")

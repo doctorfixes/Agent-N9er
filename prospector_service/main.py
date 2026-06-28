@@ -7,7 +7,7 @@ import logging
 import smtplib
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -1217,7 +1217,7 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
         if timestamp_field:
             await db.execute(
                 f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
-                (update.status, datetime.utcnow().isoformat(), prospect_id),
+                (update.status, datetime.now(timezone.utc).isoformat(), prospect_id),
             )
         else:
             await db.execute(
@@ -1403,7 +1403,7 @@ async def submit_freelancer_bid(req: FreelancerBidRequest):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE prospects SET quoted_price = ?, applied_at = ? WHERE id = ?",
-            (req.bid_amount, datetime.utcnow().isoformat(), req.prospect_id),
+            (req.bid_amount, datetime.now(timezone.utc).isoformat(), req.prospect_id),
         )
         await db.commit()
 
@@ -1550,7 +1550,7 @@ async def check_freelancer_awarded():
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
                             "UPDATE prospects SET hired_at = ? WHERE id = ?",
-                            (datetime.utcnow().isoformat(), prospect["id"]),
+                            (datetime.now(timezone.utc).isoformat(), prospect["id"]),
                         )
                         await db.commit()
                     awarded.append({
@@ -1605,7 +1605,7 @@ async def deliver_freelancer_milestone(req: DeliverRequest):
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute(
                         "UPDATE prospects SET delivered_at = ? WHERE id = ?",
-                        (datetime.utcnow().isoformat(), prospect_id),
+                        (datetime.now(timezone.utc).isoformat(), prospect_id),
                     )
                     await db.commit()
                 return {"ok": 1, "method": "status_update", "message": "Marked as delivered (no milestones found)"}
@@ -1635,7 +1635,7 @@ async def deliver_freelancer_milestone(req: DeliverRequest):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE prospects SET delivered_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), prospect_id),
+            (datetime.now(timezone.utc).isoformat(), prospect_id),
         )
         await db.commit()
 
@@ -1677,7 +1677,7 @@ async def check_freelancer_payments():
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute(
                                 "UPDATE prospects SET paid_at = ?, actual_cost = ? WHERE id = ?",
-                                (datetime.utcnow().isoformat(), total_paid, prospect["id"]),
+                                (datetime.now(timezone.utc).isoformat(), total_paid, prospect["id"]),
                             )
                             await db.commit()
                         paid.append({

@@ -136,9 +136,14 @@ async def execute(request: ExecuteRequest):
 
 
 async def _execute_with_retry(request: ExecuteRequest) -> dict:
-    last_result = None
+    last_result = {"success": False, "error": "No attempts made"}
     for attempt in range(MAX_RETRIES + 1):
-        result = await _execute_live(request)
+        try:
+            result = await _execute_live(request)
+        except Exception as e:
+            logger.error("Execution exception for task %s attempt %d: %s", request.task_id, attempt, e)
+            last_result = {"success": False, "error": str(e)}
+            continue
         if result.get("success"):
             if attempt > 0:
                 result["retries"] = attempt
