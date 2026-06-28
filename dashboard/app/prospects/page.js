@@ -76,6 +76,90 @@ function ProposalModal({ prospect, onClose }) {
   );
 }
 
+function ExecutionModal({ prospect, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await fetch(`/api/execution/${prospect.id}`);
+        if (resp.status === 404) {
+          setError("No execution record found — task may be queued or still running.");
+        } else if (!resp.ok) {
+          setError(`API error: ${resp.status}`);
+        } else {
+          setData(await resp.json());
+        }
+      } catch (e) {
+        setError(e.message);
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content" style={{ maxWidth: 700, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-cyan)", fontWeight: 600 }}>
+            Execution Details
+          </div>
+          <button className="cmd-btn sm" onClick={onClose}>Close</button>
+        </div>
+
+        <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--bg-input)", borderRadius: 4, border: "1px solid var(--border)" }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-primary)", fontWeight: 600 }}>{prospect.title}</div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+            Status: <span className={`badge ${prospect.status}`} style={{ fontSize: 9, padding: "1px 6px" }}>{prospect.status}</span>
+            {prospect.quoted_price > 0 && ` // Bid: $${prospect.quoted_price}`}
+            {prospect.complexity && ` // Complexity: ${prospect.complexity}`}
+            {prospect.tier && ` // Tier: ${prospect.tier}`}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+          {loading && <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", textAlign: "center", padding: 20 }}>Loading execution data...</div>}
+
+          {error && (
+            <div style={{ padding: "12px 16px", borderRadius: 4, background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", fontFamily: "var(--font-mono)", fontSize: 11, color: "#f87171" }}>
+              {error}
+            </div>
+          )}
+
+          {data && (
+            <>
+              <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
+                <div style={{ flex: 1, padding: "8px 12px", borderRadius: 4, background: data.success ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)", border: `1px solid ${data.success ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)"}` }}>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>Result</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: data.success ? "#34d399" : "#f87171" }}>
+                    {data.success ? "SUCCESS" : "FAILED"}
+                  </div>
+                </div>
+                <div style={{ flex: 1, padding: "8px 12px", borderRadius: 4, background: "var(--bg-input)", border: "1px solid var(--border)" }}>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>Agent</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-primary)" }}>{data.agent_id || "---"}</div>
+                </div>
+              </div>
+
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase" }}>Output</div>
+              <div style={{
+                padding: "12px 14px", borderRadius: 4, background: "var(--bg-input)", border: "1px solid var(--border)",
+                fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)",
+                whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 400, overflowY: "auto", lineHeight: 1.6,
+              }}>
+                {data.output || "(no output)"}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function ThreadModal({ msg, onClose }) {
   const [messages, setMessages] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -334,6 +418,7 @@ export default function ProspectsPage() {
   const [proposalTarget, setProposalTarget] = useState(null);
   const [threadTarget, setThreadTarget] = useState(null);
   const [bidTarget, setBidTarget] = useState(null);
+  const [execTarget, setExecTarget] = useState(null);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
@@ -506,6 +591,9 @@ export default function ProspectsPage() {
                 <td style={{ display: "flex", gap: 4 }}>
                   <button className="cmd-btn sm" onClick={() => setProposalTarget(p)}>Propose</button>
                   <button className="cmd-btn sm primary" onClick={() => setBidTarget(p)}>Bid</button>
+                  {["executing", "delivered", "paid", "hired"].includes(p.status) && (
+                    <button className="cmd-btn sm success" onClick={() => setExecTarget(p)}>Status</button>
+                  )}
                 </td>
               </tr>
             )) : (
@@ -522,6 +610,7 @@ export default function ProspectsPage() {
       {proposalTarget && <ProposalModal prospect={proposalTarget} onClose={() => setProposalTarget(null)} />}
       {threadTarget && <ThreadModal msg={threadTarget} onClose={() => setThreadTarget(null)} />}
       {bidTarget && <BidModal prospect={bidTarget} onClose={() => setBidTarget(null)} onBid={() => { setBidTarget(null); mutate(); }} />}
+      {execTarget && <ExecutionModal prospect={execTarget} onClose={() => setExecTarget(null)} />}
     </div>
   );
 }
