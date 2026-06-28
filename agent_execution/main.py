@@ -445,11 +445,15 @@ async def generate_proposal(req: ProposalRequest):
     ]
 
     try:
-        result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        result = await complete(messages, tier="deepseek_flash", max_tokens=1024, temperature=0.5)
+        proposal_text = result.content
+        proposal_text = proposal_text.replace("—", "--").replace("–", "-")
+        proposal_text = proposal_text.replace("‘", "'").replace("’", "'")
+        proposal_text = proposal_text.replace("“", '"').replace("”", '"')
         return {
             "ok": 1,
             "prospect_id": req.prospect_id,
-            "proposal": result.content,
+            "proposal": proposal_text,
             "mode": "live",
             "model": result.model,
             "cost_usd": result.cost_usd,
