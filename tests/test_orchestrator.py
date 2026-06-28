@@ -205,3 +205,513 @@ async def test_trigger_scan_while_running(client):
         assert resp.json()["ok"] == 0
     finally:
         orch._scan_state["running"] = False
+
+
+# --- Pipeline approval tests ---
+
+async def test_approve_pipeline_bids(client):
+    async with orch._agents_lock:
+        orch.registered_agents["a1"] = {
+            "agent_id": "a1", "profile": "speed", "specialization": "generalist",
+            "price": 0.1, "eta_minutes": 2, "confidence": 0.8,
+        }
+
+    mock_client, _, _ = _mock_pipeline()
+
+    async def mock_post_with_approve(url, **kwargs):
+        if "approve-all" in url:
+            return _make_response({"ok": 1, "approved_count": 1})
+        return await mock_client.post(url, **kwargs)
+
+    approve_mock = AsyncMock()
+    approve_mock.post = mock_post_with_approve
+    approve_mock.__aenter__ = AsyncMock(return_value=approve_mock)
+    approve_mock.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=approve_mock):
+        resp = await client.post("/pipeline/task-123/approve")
+
+    data = resp.json()
+    assert data["status"] in ("completed", "failed")
+    assert data["approved_bids"] == 1
+    assert "winner" in data
+
+
+async def test_approve_pipeline_no_pending_bids(client):
+    async def mock_post(url, **kwargs):
+        if "approve-all" in url:
+            return _make_response({"ok": 1, "approved_count": 0})
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/pipeline/no-such-task/approve")
+
+    assert resp.status_code == 404
+
+
+async def test_approve_pipeline_downstream_error(client):
+    from httpx import HTTPStatusError, Response, Request
+
+    async def mock_post(url, **kwargs):
+        if "approve-all" in url:
+            resp = _make_response({"detail": "error"}, 500)
+            resp.raise_for_status = MagicMock(side_effect=HTTPStatusError(
+                "Server error", request=Request("POST", url), response=Response(500)))
+            return resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/pipeline/err-task/approve")
+
+    assert resp.status_code == 502
+
+
+async def test_approve_pipeline_service_unreachable(client):
+    import httpx as httpx_lib
+
+    async def mock_post(url, **kwargs):
+        raise httpx_lib.ConnectError("Connection refused")
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/pipeline/unreach-task/approve")
+
+    assert resp.status_code == 503
+
+
+# --- Revenue pipeline tests ---
+
+async def test_revenue_pipeline_pending_approval(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p1", "title": "Test project", "description": "desc"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 50.0,
+            "estimated_cost_usd": 5.0,
+            "complexity": "moderate",
+            "recommended_tier": "standard",
+        },
+    })
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", True):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "max_results": 5,
+            })
+
+    data = resp.json()
+    assert data["approved"] == 1
+    assert data["executed"] == 0
+    prospects = data["prospects"]
+    pending = [p for p in prospects if p["status"] == "pending_approval"]
+    assert len(pending) == 1
+    assert "detail" in pending[0]
+
+
+async def test_revenue_pipeline_auto_execute(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p2", "title": "Auto exec project"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 100.0,
+            "estimated_cost_usd": 10.0,
+            "complexity": "moderate",
+            "recommended_tier": "standard",
+        },
+    })
+    exec_resp = _make_response({"ok": 1, "success": True, "mode": "simulation", "cost_usd": 0.01, "duration": 2.5})
+    patch_resp = _make_response({"ok": 1})
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        if "execute" in url:
+            return exec_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        return patch_resp
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "max_results": 5, "auto_execute": True,
+            })
+
+    data = resp.json()
+    assert data["executed"] == 1
+    assert data["estimated_profit"] > 0
+
+
+async def test_revenue_pipeline_rejected_prospect(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p3", "title": "Non-digital task"}])
+    eval_resp = _make_response({
+        "status": "rejected",
+        "evaluation": {"rejection_reason": "non-digital task"},
+    })
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={"platform": "upwork"})
+
+    data = resp.json()
+    assert data["evaluated"] == 1
+    assert data["approved"] == 0
+    rejected = [p for p in data["prospects"] if p["status"] == "rejected"]
+    assert len(rejected) == 1
+
+
+async def test_revenue_pipeline_auto_execute_disabled(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p4", "title": "Hold project"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 25.0,
+            "estimated_cost_usd": 2.5,
+            "complexity": "simple",
+        },
+    })
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "auto_execute": False,
+            })
+
+    data = resp.json()
+    assert data["approved"] == 1
+    assert data["executed"] == 0
+    approved = [p for p in data["prospects"] if p["status"] == "approved"]
+    assert len(approved) == 1
+
+
+async def test_revenue_pipeline_execution_failure(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p5", "title": "Failing project"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 50.0,
+            "estimated_cost_usd": 5.0,
+            "complexity": "moderate",
+        },
+    })
+    exec_resp = _make_response({"ok": 1, "success": False, "mode": "simulation"})
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        if "execute" in url:
+            return exec_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "auto_execute": True,
+            })
+
+    data = resp.json()
+    assert data["executed"] == 0
+    failed = [p for p in data["prospects"] if p["status"] == "execution_failed"]
+    assert len(failed) == 1
+
+
+async def test_revenue_pipeline_service_unreachable(client):
+    import httpx as httpx_lib
+
+    async def mock_post(url, **kwargs):
+        raise httpx_lib.ConnectError("Connection refused")
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/revenue-pipeline", json={"platform": "upwork"})
+
+    assert resp.status_code == 503
+
+
+async def test_revenue_pipeline_with_invoicing(client):
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p6", "title": "Invoice project", "client_email": "client@test.com"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 200.0,
+            "estimated_cost_usd": 20.0,
+            "complexity": "complex",
+            "recommended_tier": "premium",
+        },
+    })
+    exec_resp = _make_response({"ok": 1, "success": True, "mode": "live", "cost_usd": 0.05, "duration": 5.0})
+    invoice_resp = _make_response({"ok": 1, "invoice_id": "inv-001"})
+    patch_resp = _make_response({"ok": 1})
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        if "execute" in url:
+            return exec_resp
+        if "invoices" in url:
+            return invoice_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        return patch_resp
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "auto_execute": True,
+            })
+
+    data = resp.json()
+    assert data["executed"] == 1
+    assert data["invoiced"] == 1
+    executed = [p for p in data["prospects"] if p["status"] == "executed"]
+    assert executed[0]["invoice_id"] == "inv-001"
+
+
+async def test_revenue_pipeline_require_approval_override(client):
+    """Test that per-request require_approval overrides the global config."""
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p7", "title": "Override test"}])
+    eval_resp = _make_response({
+        "status": "approved",
+        "evaluation": {
+            "quoted_price_usd": 30.0,
+            "estimated_cost_usd": 3.0,
+            "complexity": "simple",
+        },
+    })
+    exec_resp = _make_response({"ok": 1, "success": True, "mode": "simulation", "cost_usd": 0.01, "duration": 1.0})
+    patch_resp = _make_response({"ok": 1})
+
+    async def mock_post(url, **kwargs):
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            return eval_resp
+        if "execute" in url:
+            return exec_resp
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        return patch_resp
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", True):
+            resp = await client.post("/revenue-pipeline", json={
+                "platform": "upwork", "auto_execute": True,
+                "require_approval": False,
+            })
+
+    data = resp.json()
+    assert data["executed"] == 1
+
+
+async def test_revenue_pipeline_prospect_eval_error(client):
+    """Test that evaluation network errors are handled per-prospect."""
+    import httpx as httpx_lib
+
+    scan_resp = _make_response({"ok": 1, "discovered": 1, "new": 1})
+    prospects_resp = _make_response([{"id": "p8", "title": "Error prospect"}])
+
+    call_count = 0
+
+    async def mock_post(url, **kwargs):
+        nonlocal call_count
+        if "scan" in url:
+            return scan_resp
+        if "evaluate" in url:
+            raise httpx_lib.ReadTimeout("timed out")
+        return _make_response({"ok": 1})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return prospects_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/revenue-pipeline", json={"platform": "upwork"})
+
+    data = resp.json()
+    error_prospects = [p for p in data["prospects"] if p["status"] == "error"]
+    assert len(error_prospects) == 1
+
+
+async def test_full_pipeline_bid_submission_error(client):
+    """Test that bid submission failure for an agent is handled gracefully."""
+    import httpx as httpx_lib
+
+    async with orch._agents_lock:
+        orch.registered_agents["a1"] = {
+            "agent_id": "a1", "profile": "speed", "specialization": "generalist",
+            "price": 0.1, "eta_minutes": 2, "confidence": 0.8,
+        }
+
+    normalized = {"id": "n1", "objective": "test", "inputs": {}, "source": "manual", "raw": {}}
+    ranked = {"id": "n1", "priority_score": 0.9}
+
+    async def mock_post(url, **kwargs):
+        if "normalize" in url:
+            return _make_response(normalized)
+        if "rank" in url:
+            return _make_response(ranked)
+        if "publish" in url:
+            return _make_response({"ok": 1})
+        if "/bid" in url:
+            raise httpx_lib.ConnectError("bid service down")
+        if "award" in url:
+            return _make_response({"ok": 1, "winner": {"agent_id": "a1", "confidence": 0.8}})
+        if "execute" in url:
+            return _make_response({"ok": 1, "success": True, "duration": 1.0})
+        if "complete" in url:
+            return _make_response({"ok": 1})
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/pipeline/full", json={"objective": "test"})
+
+    assert resp.status_code in (200, 502)

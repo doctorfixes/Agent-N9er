@@ -198,3 +198,94 @@ async def test_cannot_approve_already_submitted_bid(client):
 
     resp = await client.post(f"/bids/{bid['id']}/approve")
     assert resp.status_code == 409
+
+
+async def test_approve_nonexistent_bid_returns_404(client):
+    resp = await client.post("/bids/99999/approve")
+    assert resp.status_code == 404
+
+
+async def test_reject_nonexistent_bid_returns_404(client):
+    resp = await client.post("/bids/99999/reject")
+    assert resp.status_code == 404
+
+
+async def test_cannot_reject_already_submitted_bid(client):
+    await client.post("/publish", json={"id": "ap8", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap8", "agent_id": "a1", "confidence": 0.7, "require_approval": False})
+    bids = (await client.get("/bids/ap8")).json()
+    bid = bids[0]
+
+    resp = await client.post(f"/bids/{bid['id']}/reject")
+    assert resp.status_code == 409
+
+
+async def test_get_bids_nonexistent_task_returns_404(client):
+    resp = await client.get("/bids/nonexistent-task-xyz")
+    assert resp.status_code == 404
+
+
+async def test_feed_filter_by_status(client):
+    await client.post("/publish", json={"id": "fs1", "objective": "x"})
+    await client.post("/publish", json={"id": "fs2", "objective": "y"})
+    await client.post("/complete/fs1", json={"success": True})
+    open_feed = (await client.get("/feed", params={"status": "open"})).json()
+    completed_feed = (await client.get("/feed", params={"status": "completed"})).json()
+    assert all(t["status"] == "open" for t in open_feed)
+    assert all(t["status"] == "completed" for t in completed_feed)
+
+
+async def test_award_no_submitted_bids_returns_404(client):
+    await client.post("/publish", json={"id": "ap9", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap9", "agent_id": "a1", "confidence": 0.7})
+    resp = await client.post("/award/ap9")
+    assert resp.status_code == 404
+
+
+async def test_bid_status_included_in_response(client):
+    await client.post("/publish", json={"id": "bs1", "objective": "x"})
+    await client.post("/bid", json={"task_id": "bs1", "agent_id": "a1", "confidence": 0.7})
+    bids = (await client.get("/bids/bs1")).json()
+    assert bids[0]["status"] == "pending_approval"
+    assert "reviewed_at" in bids[0]
+
+
+async def test_approve_sets_reviewed_at(client):
+    await client.post("/publish", json={"id": "rv1", "objective": "x"})
+    await client.post("/bid", json={"task_id": "rv1", "agent_id": "a1", "confidence": 0.7})
+    pending = (await client.get("/bids/pending")).json()
+    bid = next(b for b in pending if b["task_id"] == "rv1")
+
+    await client.post(f"/bids/{bid['id']}/approve")
+    bids = (await client.get("/bids/rv1")).json()
+    assert bids[0]["reviewed_at"] is not None
+
+
+async def test_reject_sets_reviewed_at(client):
+    await client.post("/publish", json={"id": "rv2", "objective": "x"})
+    await client.post("/bid", json={"task_id": "rv2", "agent_id": "a1", "confidence": 0.7})
+    pending = (await client.get("/bids/pending")).json()
+    bid = next(b for b in pending if b["task_id"] == "rv2")
+
+    await client.post(f"/bids/{bid['id']}/reject")
+    bids = (await client.get("/bids/rv2")).json()
+    assert bids[0]["status"] == "rejected"
+    assert bids[0]["reviewed_at"] is not None
+
+
+async def test_approve_all_with_no_pending_bids(client):
+    await client.post("/publish", json={"id": "aa1", "objective": "x"})
+    resp = await client.post("/bids/approve-all/aa1")
+    data = resp.json()
+    assert data["approved_count"] == 0
+
+
+async def test_pending_bids_pagination(client):
+    await client.post("/publish", json={"id": "pp1", "objective": "x"})
+    for i in range(5):
+        await client.post("/bid", json={"task_id": "pp1", "agent_id": f"agent-pg-{i}", "confidence": 0.5})
+    page1 = (await client.get("/bids/pending", params={"limit": 2})).json()
+    page2 = (await client.get("/bids/pending", params={"limit": 2, "offset": 2})).json()
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert page1[0]["id"] != page2[0]["id"]
