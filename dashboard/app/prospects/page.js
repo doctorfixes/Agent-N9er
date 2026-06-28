@@ -117,12 +117,16 @@ function ExecutionModal({ prospect, onClose }) {
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ prospect_id: prospect.id }),
                 });
-                const result = await resp.json();
-                if (result.ok) {
+                const text = await resp.text();
+                let result;
+                try { result = JSON.parse(text); } catch { result = null; }
+                if (!result) {
+                  setError(`Service returned empty response (status ${resp.status}) — execution may still be running. Check logs.`);
+                } else if (result.ok) {
                   setData(result.result || null);
                   setError(null);
                 } else {
-                  setError(`Execution failed: ${result.status || "unknown"}`);
+                  setError(`Execution failed: ${result.error || result.status || result.detail || "unknown"}`);
                 }
               } catch (e) {
                 setError(e.message);
