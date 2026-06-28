@@ -123,7 +123,7 @@ export default function ProspectsPage() {
     setScanning(false);
   };
 
-  const statusFilters = ["", "discovered", "approved", "applied", "hired", "executing", "delivered", "paid"];
+  const statusFilters = ["", "discovered", "approved", "applied", "rejected", "hired", "executing", "delivered", "paid"];
 
   return (
     <div>
@@ -168,6 +168,8 @@ export default function ProspectsPage() {
       <div className="metric-grid" style={{ marginBottom: 16 }}>
         <div className="metric cyan"><div className="metric-label">Total</div><div className="metric-value">{stats?.total_prospects ?? 0}</div></div>
         <div className="metric green"><div className="metric-label">Approved</div><div className="metric-value">{stats?.by_status?.approved ?? 0}</div></div>
+        <div className="metric blue"><div className="metric-label">Applied</div><div className="metric-value">{stats?.by_status?.applied ?? 0}</div></div>
+        <div className="metric red"><div className="metric-label">Rejected</div><div className="metric-value">{stats?.by_status?.rejected ?? 0}</div></div>
         <div className="metric blue"><div className="metric-label">Executing</div><div className="metric-value">{stats?.by_status?.executing ?? 0}</div></div>
         <div className="metric green"><div className="metric-label">Delivered</div><div className="metric-value">{stats?.by_status?.delivered ?? 0}</div></div>
         <div className="metric amber"><div className="metric-label">Revenue</div><div className="metric-value">${stats?.revenue ?? 0}</div></div>
@@ -188,26 +190,30 @@ export default function ProspectsPage() {
               <th>Title</th>
               <th>Platform</th>
               <th>Budget</th>
+              <th>Bid</th>
               <th>Status</th>
-              <th>Discovered</th>
+              <th>Applied</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {prospects && prospects.length > 0 ? prospects.map((p) => (
               <tr key={p.id}>
-                <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-primary)", fontWeight: 500 }}>{p.title}</td>
+                <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-primary)", fontWeight: 500 }}>
+                  {p.url ? <a href={p.url} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }}>{p.title}</a> : p.title}
+                </td>
                 <td style={{ textTransform: "uppercase", fontSize: 10 }}>{p.platform}</td>
                 <td>{p.budget_max > 0 ? `$${p.budget_min}-$${p.budget_max}` : "---"}</td>
+                <td style={{ fontSize: 11, color: "var(--accent-cyan)" }}>{p.quoted_price > 0 ? `$${p.quoted_price}` : "---"}</td>
                 <td><span className={`badge ${p.status}`}>{p.status}</span></td>
-                <td style={{ fontSize: 10 }}>{p.discovered_at ? new Date(p.discovered_at).toLocaleDateString() : "---"}</td>
+                <td style={{ fontSize: 10 }}>{p.applied_at ? new Date(p.applied_at).toLocaleDateString() : "---"}</td>
                 <td>
                   <button className="cmd-btn sm" onClick={() => setProposalTarget(p)}>Propose</button>
                 </td>
               </tr>
             )) : (
               <tr>
-                <td colSpan={6} style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                <td colSpan={7} style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
                   No prospects. Initiate scan to discover opportunities.
                 </td>
               </tr>

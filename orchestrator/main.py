@@ -213,29 +213,19 @@ async def _auto_evaluate_and_bid(svc=None):
     async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
         prospects_resp = await client.get(
             f"{PROSPECTOR_URL}/prospects",
-            params={"status": "discovered", "platform": "freelancer", "limit": 20},
+            params={"status": "approved", "platform": "freelancer", "limit": 20},
             headers=svc,
         )
         prospects_resp.raise_for_status()
-        prospects = prospects_resp.json()
+        prospects = [p for p in prospects_resp.json() if not p.get("applied_at")]
 
+        logger.info("Auto-bid: %d approved Freelancer prospects without bids", len(prospects))
         for prospect in prospects:
             pid = prospect["id"]
             try:
-                eval_resp = await client.post(
-                    f"{PROSPECTOR_URL}/prospects/{pid}/evaluate",
-                    headers=svc,
-                )
-                eval_resp.raise_for_status()
-                eval_data = eval_resp.json()
-
-                if eval_data.get("status") != "approved":
-                    continue
-
-                evaluation = eval_data.get("evaluation", {})
-                quoted = evaluation.get("quoted_price_usd", 0)
                 budget_min = prospect.get("budget_min", 0) or 0
                 budget_max = prospect.get("budget_max", 0) or 0
+                quoted = prospect.get("quoted_price", 0) or 0
                 bid_amount = max(quoted, budget_min, 15.0)
                 if budget_max > 0:
                     bid_amount = min(bid_amount, budget_max)
@@ -266,7 +256,7 @@ async def _auto_evaluate_and_bid(svc=None):
                     json={
                         "prospect_id": pid,
                         "bid_amount": bid_amount,
-                        "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
+                        "period": 7,
                         "milestone_percentage": 100.0,
                         "description": proposal_text,
                     },
