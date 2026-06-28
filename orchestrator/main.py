@@ -1226,6 +1226,30 @@ async def execute_prospect(body: dict):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/reset-prospect")
+async def reset_prospect(body: dict):
+    """Reset a stuck prospect's status (e.g. from 'executing' back to 'hired' or 'rejected')."""
+    prospect_id = body.get("prospect_id")
+    new_status = body.get("status", "hired")
+    reason = body.get("reason", "")
+    if not prospect_id:
+        raise HTTPException(status_code=400, detail="prospect_id required")
+    allowed = {"hired", "rejected", "evaluated", "new"}
+    if new_status not in allowed:
+        raise HTTPException(status_code=400, detail=f"status must be one of {allowed}")
+    svc = _svc_headers()
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        resp = await client.patch(
+            f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+            json={"status": new_status},
+            headers=svc,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="Failed to update prospect")
+    _log_activity("status_reset", f"Reset prospect to '{new_status}': {reason or prospect_id}", {"prospect_id": prospect_id})
+    return {"ok": 1, "status": new_status}
+
+
 @app.post("/auto-reply/trigger")
 async def trigger_auto_reply(body: dict):
     """Manually trigger an auto-reply for a specific thread."""

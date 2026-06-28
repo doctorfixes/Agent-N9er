@@ -133,6 +133,18 @@ function ExecutionModal({ prospect, onClose }) {
               }
               setReexecuting(false);
             }}>{reexecuting ? "Executing..." : (error || !data) ? "Execute" : "Re-execute"}</button>
+            <button className="cmd-btn sm" style={{ background: "rgba(239,68,68,0.15)", color: "#f87171", border: "1px solid rgba(239,68,68,0.3)" }} onClick={async () => {
+              if (!confirm(`Reset "${prospect.title}" status? This will move it back so it can be re-evaluated.`)) return;
+              try {
+                const resp = await fetch("/api/prospects/reset", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ prospect_id: prospect.id, status: "rejected", reason: "Manually reset — stuck at executing" }),
+                });
+                const r = await resp.json().catch(() => null);
+                if (r?.ok) { onClose(); } else { setError("Reset failed"); }
+              } catch (e) { setError(e.message); }
+            }}>Reset</button>
             <button className="cmd-btn sm" onClick={onClose}>Close</button>
           </div>
         </div>
