@@ -48,6 +48,14 @@ FREELANCER_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "15000"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "true").lower() == "true"
+AUTO_REPLY_DELAY_SECONDS = int(os.getenv("AUTO_REPLY_DELAY_SECONDS", "30"))
+AUTO_REPLY_MAX_PER_THREAD_HOUR = int(os.getenv("AUTO_REPLY_MAX_PER_THREAD_HOUR", "3"))
+TELEGRAM_COMMAND_ENABLED = os.getenv("TELEGRAM_COMMAND_ENABLED", "true").lower() == "true"
+
+_reply_tracker: dict[int, list[float]] = {}
+_pending_replies: dict[int, dict] = {}
+_telegram_poll_task: asyncio.Task | None = None
+_last_telegram_update_id = 0
 
 
 async def telegram_notify(message: str):
@@ -533,6 +541,22 @@ async def _check_awarded_and_execute(svc=None):
             logger.warning("Payment check failed: %s", e)
 
 
+def _is_rate_limited(thread_id: int) -> bool:
+    """Check if a thread has exceeded the hourly reply limit."""
+    import time
+    now = time.time()
+    cutoff = now - 3600
+    timestamps = _reply_tracker.get(thread_id, [])
+    timestamps = [t for t in timestamps if t > cutoff]
+    _reply_tracker[thread_id] = timestamps
+    return len(timestamps) >= AUTO_REPLY_MAX_PER_THREAD_HOUR
+
+
+def _record_reply(thread_id: int):
+    import time
+    _reply_tracker.setdefault(thread_id, []).append(time.time())
+
+
 async def _check_freelancer_messages(svc=None):
     """Poll Freelancer messenger for unread messages, auto-reply when appropriate."""
     if svc is None:
@@ -560,15 +584,21 @@ async def _check_freelancer_messages(svc=None):
                 project_id = msg.get("project_id", "")
                 thread_id = msg.get("thread_id")
                 prospect = msg.get("prospect")
+                our_user_id = os.getenv("FREELANCER_USER_ID", "")
+                last_sender_id = str(msg.get("last_message_from", ""))
+                if last_sender_id and our_user_id and last_sender_id == our_user_id:
+                    continue
 
                 project_info = ""
                 status = ""
                 title = ""
                 quoted_price = 0
+                description = ""
                 if prospect:
                     title = prospect.get("title", "Unknown")
                     status = prospect.get("status", "unknown")
                     quoted_price = prospect.get("quoted_price", 0)
+                    description = prospect.get("description", "")
                     project_info = (
                         f"Project: {title}\n"
                         f"Status: {status}\n"
@@ -585,7 +615,49 @@ async def _check_freelancer_messages(svc=None):
                 )
                 logger.info("Freelancer message from %s on project %s", sender, project_id or "direct")
 
-                if AUTO_REPLY_ENABLED and thread_id and preview:
+                if not AUTO_REPLY_ENABLED or not thread_id or not preview:
+                    continue
+
+                if _is_rate_limited(thread_id):
+                    logger.info("Rate limited: skipping auto-reply for thread %s", thread_id)
+                    continue
+
+                is_quote_request = _detect_quote_request(preview, status)
+
+                if TELEGRAM_COMMAND_ENABLED and AUTO_REPLY_DELAY_SECONDS > 0:
+                    reply_data = {
+                        "thread_id": thread_id, "sender": sender,
+                        "client_message": preview, "title": title,
+                        "status": status, "quoted_price": quoted_price,
+                        "project_id": project_id, "description": description,
+                        "is_quote_request": is_quote_request,
+                    }
+                    _pending_replies[thread_id] = reply_data
+
+                    await telegram_notify(
+                        f"PENDING AUTO-REPLY (sends in {AUTO_REPLY_DELAY_SECONDS}s)\n"
+                        f"Thread: {thread_id}\n"
+                        f"{'QUOTE REQUEST detected' if is_quote_request else 'Standard reply'}\n\n"
+                        f"Reply with:\n"
+                        f"  /override {thread_id} <your message>\n"
+                        f"  /skip {thread_id}\n"
+                        f"  /send {thread_id}  (send immediately)"
+                    )
+
+                    await asyncio.sleep(AUTO_REPLY_DELAY_SECONDS)
+
+                    if thread_id not in _pending_replies:
+                        logger.info("Reply for thread %s was overridden or skipped", thread_id)
+                        continue
+                    del _pending_replies[thread_id]
+
+                if is_quote_request:
+                    await _generate_and_send_quote(
+                        client, svc, thread_id, sender, preview,
+                        title=title, status=status, description=description,
+                        project_id=project_id,
+                    )
+                else:
                     await _auto_reply_to_message(
                         client, svc, thread_id, sender, preview,
                         title=title, status=status, quoted_price=quoted_price,
@@ -594,6 +666,124 @@ async def _check_freelancer_messages(svc=None):
 
     except Exception as e:
         logger.warning("Freelancer message check failed: %s", e)
+
+
+def _detect_quote_request(message: str, status: str) -> bool:
+    """Detect if a client message is asking for a quote or price."""
+    import re
+    if status in ("awarded", "hired", "delivering", "active"):
+        return False
+    quote_patterns = [
+        r"how much", r"what.*cost", r"your (price|rate|quote|fee)",
+        r"can you do.*for \$?\d+", r"what would you charge",
+        r"give me a (quote|estimate|price)", r"budget is",
+        r"willing to pay", r"what.*your.*price", r"pricing",
+        r"how long.*how much", r"send.*proposal", r"quote me",
+    ]
+    msg_lower = message.lower()
+    return any(re.search(p, msg_lower) for p in quote_patterns)
+
+
+async def _generate_and_send_quote(
+    client, svc, thread_id, sender, client_message, *,
+    title="", status="", description="", project_id="",
+):
+    """Evaluate feasibility and generate a quote for a new inquiry."""
+    try:
+        eval_result = None
+        if title or description:
+            eval_resp = await client.post(
+                f"{EVALUATOR_URL}/evaluate",
+                json={
+                    "title": title or "Inquiry from DM",
+                    "description": description or client_message,
+                    "platform": "freelancer",
+                },
+                headers=svc,
+                timeout=30.0,
+            )
+            if eval_resp.status_code == 200:
+                eval_result = eval_resp.json()
+
+        quote_context = ""
+        if eval_result:
+            viable = eval_result.get("viable", True)
+            if not viable:
+                reason = eval_result.get("rejection_reason", "")
+                logger.info("Quote declined for thread %s: %s", thread_id, reason)
+                await telegram_notify(
+                    f"QUOTE DECLINED for thread {thread_id}\n"
+                    f"Project: {title or 'DM inquiry'}\n"
+                    f"Reason: {reason or 'Not viable'}"
+                )
+                return
+            quoted = eval_result.get("quoted_price_usd", 0)
+            complexity = eval_result.get("complexity", "moderate")
+            tier = eval_result.get("recommended_tier", "standard")
+            quote_context = (
+                f"\nEvaluation results:\n"
+                f"- Recommended quote: ${quoted:.2f}\n"
+                f"- Complexity: {complexity}\n"
+                f"- Recommended approach: {tier}\n"
+            )
+
+        system_prompt = (
+            "You are a professional freelance developer providing a quote on Freelancer.com. "
+            "Be concise, confident, and specific. Keep replies under 120 words. "
+            "Never reveal you are an AI. Respond as an experienced developer. "
+            "Include: 1) brief confirmation you can do the work, "
+            "2) your price/estimate, 3) estimated timeline, "
+            "4) a short note on your approach. Be competitive but fair."
+        )
+
+        user_prompt = (
+            f"A client ({sender}) is asking about a project."
+        )
+        if title:
+            user_prompt += f"\nProject title: {title}"
+        if description:
+            user_prompt += f"\nProject description: {description[:500]}"
+        user_prompt += f"\n\nClient message: {client_message}"
+        if quote_context:
+            user_prompt += f"\n{quote_context}"
+        user_prompt += "\n\nGenerate a professional quote response:"
+
+        llm_resp = await llm_complete(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            tier="budget",
+            max_tokens=300,
+            temperature=0.4,
+        )
+
+        reply_text = llm_resp.content.strip()
+        if not reply_text:
+            return
+
+        send_resp = await client.post(
+            f"{PROSPECTOR_URL}/freelancer/thread/{thread_id}/reply",
+            json={"message": reply_text},
+            headers=svc,
+        )
+
+        if send_resp.status_code == 200:
+            _record_reply(thread_id)
+            quoted_str = f"${eval_result.get('quoted_price_usd', 0):.2f}" if eval_result else "custom"
+            await telegram_notify(
+                f"QUOTE SENT on Freelancer\n"
+                f"To: {sender}\n"
+                f"Project: {title or project_id or 'DM inquiry'}\n"
+                f"Evaluated price: {quoted_str}\n"
+                f"Reply: {reply_text[:200]}"
+            )
+            logger.info("Quote sent to thread %s for project %s", thread_id, project_id or "direct")
+        else:
+            logger.warning("Failed to send quote to thread %s: %s", thread_id, send_resp.text)
+
+    except Exception as e:
+        logger.warning("Quote generation failed for thread %s: %s", thread_id, e)
 
 
 async def _auto_reply_to_message(
@@ -675,6 +865,7 @@ async def _auto_reply_to_message(
         )
 
         if send_resp.status_code == 200:
+            _record_reply(thread_id)
             await telegram_notify(
                 f"AUTO-REPLIED on Freelancer\n"
                 f"To: {sender}\n"
@@ -689,19 +880,128 @@ async def _auto_reply_to_message(
         logger.warning("Auto-reply failed for thread %s: %s", thread_id, e)
 
 
+async def _telegram_command_loop():
+    """Poll Telegram for command messages to override/skip pending auto-replies."""
+    global _last_telegram_update_id
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_COMMAND_ENABLED:
+        return
+
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                    params={"offset": _last_telegram_update_id + 1, "timeout": 10},
+                )
+                if resp.status_code != 200:
+                    await asyncio.sleep(5)
+                    continue
+
+                updates = resp.json().get("result", [])
+                for update in updates:
+                    _last_telegram_update_id = update["update_id"]
+                    message = update.get("message", {})
+                    text = message.get("text", "").strip()
+                    chat_id = str(message.get("chat", {}).get("id", ""))
+
+                    if chat_id != TELEGRAM_CHAT_ID:
+                        continue
+
+                    await _handle_telegram_command(text)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("Telegram command poll error: %s", e)
+            await asyncio.sleep(10)
+
+
+async def _handle_telegram_command(text: str):
+    """Process a Telegram command for overriding auto-replies."""
+    import re
+
+    override_match = re.match(r"/override\s+(\d+)\s+(.+)", text, re.DOTALL)
+    if override_match:
+        thread_id = int(override_match.group(1))
+        custom_message = override_match.group(2).strip()
+        if thread_id in _pending_replies:
+            del _pending_replies[thread_id]
+            svc = _svc_headers()
+            async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+                send_resp = await client.post(
+                    f"{PROSPECTOR_URL}/freelancer/thread/{thread_id}/reply",
+                    json={"message": custom_message},
+                    headers=svc,
+                )
+                if send_resp.status_code == 200:
+                    _record_reply(thread_id)
+                    await telegram_notify(f"MANUAL REPLY sent to thread {thread_id}")
+                else:
+                    await telegram_notify(f"Failed to send override to thread {thread_id}")
+        else:
+            await telegram_notify(f"No pending reply for thread {thread_id} (already sent or expired)")
+        return
+
+    skip_match = re.match(r"/skip\s+(\d+)", text)
+    if skip_match:
+        thread_id = int(skip_match.group(1))
+        if thread_id in _pending_replies:
+            del _pending_replies[thread_id]
+            await telegram_notify(f"Skipped auto-reply for thread {thread_id}")
+        else:
+            await telegram_notify(f"No pending reply for thread {thread_id}")
+        return
+
+    send_match = re.match(r"/send\s+(\d+)", text)
+    if send_match:
+        thread_id = int(send_match.group(1))
+        if thread_id in _pending_replies:
+            reply_data = _pending_replies.pop(thread_id)
+            svc = _svc_headers()
+            async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+                if reply_data.get("is_quote_request"):
+                    await _generate_and_send_quote(
+                        client, svc, thread_id, reply_data["sender"],
+                        reply_data["client_message"],
+                        title=reply_data["title"], status=reply_data["status"],
+                        description=reply_data["description"],
+                        project_id=reply_data["project_id"],
+                    )
+                else:
+                    await _auto_reply_to_message(
+                        client, svc, thread_id, reply_data["sender"],
+                        reply_data["client_message"],
+                        title=reply_data["title"], status=reply_data["status"],
+                        quoted_price=reply_data["quoted_price"],
+                        project_id=reply_data["project_id"],
+                    )
+        else:
+            await telegram_notify(f"No pending reply for thread {thread_id}")
+        return
+
+
 @asynccontextmanager
 async def lifespan(app):
-    global _scan_task
+    global _scan_task, _telegram_poll_task
     await _init_db()
     await _load_agents()
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
         logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
+    if TELEGRAM_COMMAND_ENABLED and TELEGRAM_BOT_TOKEN:
+        _telegram_poll_task = asyncio.create_task(_telegram_command_loop())
+        logger.info("Telegram command interface enabled (delay=%ds)", AUTO_REPLY_DELAY_SECONDS)
     yield
     if _scan_task:
         _scan_task.cancel()
         try:
             await _scan_task
+        except asyncio.CancelledError:
+            pass
+    if _telegram_poll_task:
+        _telegram_poll_task.cancel()
+        try:
+            await _telegram_poll_task
         except asyncio.CancelledError:
             pass
 
