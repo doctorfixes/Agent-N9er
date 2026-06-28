@@ -48,10 +48,12 @@ async def telegram_notify(message: str):
         return
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
+            resp = await client.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
             )
+            if resp.status_code != 200:
+                logger.warning("Telegram send failed (%d): %s", resp.status_code, resp.text)
     except Exception as e:
         logger.warning("Telegram notification failed: %s", e)
 
@@ -188,7 +190,7 @@ async def _run_scan_cycle():
     logger.info("Scan cycle complete: %d platforms, %d new prospects", len(SCAN_PLATFORMS), total_new)
     if total_new > 0:
         await telegram_notify(
-            f"*Scan Complete*\n"
+            f"SCAN COMPLETE\n"
             f"New prospects: {total_new}\n"
             f"Platforms: {', '.join(SCAN_PLATFORMS)}"
         )
@@ -557,7 +559,7 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 prospect_result["status"] = "applied"
                                 logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], quoted)
                                 await telegram_notify(
-                                    f"*Bid Placed*\n"
+                                    f"BID PLACED\n"
                                     f"Project: {prospect.get('title', 'Unknown')}\n"
                                     f"Amount: ${quoted:.2f}\n"
                                     f"Bid ID: {bid_data.get('bid_id')}\n"
