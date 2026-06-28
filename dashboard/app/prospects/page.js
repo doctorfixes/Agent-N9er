@@ -3,7 +3,12 @@
 import { useState, useEffect } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+async function safeJson(resp) {
+  const text = await resp.text();
+  try { return JSON.parse(text); } catch { return { error: text || "Empty response", _status: resp.status }; }
+}
+
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 function ProposalModal({ prospect, onClose }) {
   const [proposal, setProposal] = useState(null);
@@ -26,7 +31,7 @@ function ProposalModal({ prospect, onClose }) {
           tone,
         }),
       });
-      setProposal(await resp.json());
+      setProposal(await safeJson(resp));
     } catch (e) {
       setProposal({ error: e.message });
     }
@@ -91,7 +96,7 @@ function ExecutionModal({ prospect, onClose }) {
         } else if (!resp.ok) {
           setError(`API error: ${resp.status}`);
         } else {
-          setData(await resp.json());
+          setData(await safeJson(resp));
         }
       } catch (e) {
         setError(e.message);
@@ -211,7 +216,7 @@ function ThreadModal({ msg, onClose }) {
     setLoading(true);
     try {
       const resp = await fetch(`/api/thread/${msg.thread_id}`);
-      const data = await resp.json();
+      const data = await safeJson(resp);
       setMessages(data.messages || []);
     } catch (e) {
       setMessages([]);
@@ -352,7 +357,7 @@ function BidModal({ prospect, onClose, onBid }) {
           tone: "professional",
         }),
       });
-      const data = await resp.json();
+      const data = await safeJson(resp);
       if (data.proposal) setProposal(data.proposal);
     } catch (e) {
       alert("Proposal generation failed: " + e.message);
@@ -374,7 +379,7 @@ function BidModal({ prospect, onClose, onBid }) {
           description: proposal,
         }),
       });
-      const data = await resp.json();
+      const data = await safeJson(resp);
       setResult(data);
       if (data.ok && onBid) onBid();
     } catch (e) {
@@ -476,7 +481,7 @@ export default function ProspectsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform }),
       });
-      setScanResult(await resp.json());
+      setScanResult(await safeJson(resp));
       mutate();
     } catch (e) {
       setScanResult({ error: e.message });
@@ -489,7 +494,7 @@ export default function ProspectsPage() {
     setScanResult(null);
     try {
       const resp = await fetch("/api/scan", { method: "POST" });
-      const data = await resp.json();
+      const data = await safeJson(resp);
       const results = data.results || {};
       setScanResult({
         discovered: Object.values(results).reduce((s, r) => s + (r.discovered || 0), 0),

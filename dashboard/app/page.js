@@ -3,7 +3,7 @@
 import { useState, useRef } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 function Panel({ title, dot, children, actions }) {
   return (
@@ -96,7 +96,7 @@ export default function MissionControl() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ objective }),
       });
-      const data = await resp.json();
+      const data = await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } });
       setTaskResult(data);
       if (data.status === "completed") {
         addActivity(`Task ${data.task_id?.substring(0, 8)} completed by ${data.winner?.agent_id}`, "success");
@@ -136,7 +136,7 @@ export default function MissionControl() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "trigger" }),
       });
-      const data = await resp.json();
+      const data = await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } });
       addActivity(`Recurring triggered: ${data.processed || 0} tasks processed`, "success");
     } catch (e) {
       addActivity(`Trigger failed: ${e.message}`, "error");
