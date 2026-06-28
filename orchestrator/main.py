@@ -38,6 +38,7 @@ EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
 FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "true").lower() == "true"
+FREELANCER_MAX_BIDS_PER_MONTH = int(os.getenv("FREELANCER_MAX_BIDS_PER_MONTH", "45"))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -217,9 +218,30 @@ async def _auto_evaluate_and_bid(svc=None):
             headers=svc,
         )
         prospects_resp.raise_for_status()
-        prospects = [p for p in prospects_resp.json() if not p.get("applied_at")]
+        all_prospects = prospects_resp.json()
 
-        logger.info("Auto-bid: %d approved Freelancer prospects without bids", len(prospects))
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        applied_resp = await client.get(
+            f"{PROSPECTOR_URL}/prospects",
+            params={"status": "applied", "platform": "freelancer", "limit": 200},
+            headers=svc,
+        )
+        bids_this_month = 0
+        if applied_resp.status_code == 200:
+            for p in applied_resp.json():
+                if p.get("applied_at", "") >= month_start:
+                    bids_this_month += 1
+
+        remaining = FREELANCER_MAX_BIDS_PER_MONTH - bids_this_month
+        if remaining <= 0:
+            logger.info("Auto-bid: monthly bid limit reached (%d/%d), skipping", bids_this_month, FREELANCER_MAX_BIDS_PER_MONTH)
+            await telegram_notify(f"AUTO-BID PAUSED\nMonthly bid limit reached: {bids_this_month}/{FREELANCER_MAX_BIDS_PER_MONTH}")
+            return 0
+
+        prospects = [p for p in all_prospects if not p.get("applied_at")][:remaining]
+
+        logger.info("Auto-bid: %d approved Freelancer prospects without bids (%d/%d monthly limit)", len(prospects), bids_this_month, FREELANCER_MAX_BIDS_PER_MONTH)
         for prospect in prospects:
             pid = prospect["id"]
             try:
