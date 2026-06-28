@@ -1646,6 +1646,117 @@ async def check_freelancer_payments():
     return {"ok": 1, "paid": paid, "count": len(paid)}
 
 
+@app.get("/freelancer/messages")
+async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
+    """Fetch recent message threads from Freelancer messenger."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            params = {
+                "limit": limit,
+                "compact": "true",
+                "message_context_details": "true",
+                "user_details": "true",
+            }
+            if unread_only:
+                params["is_read"] = "false"
+
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                params=params,
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            threads = data.get("threads", [])
+            users = data.get("users", {})
+
+            messages = []
+            for thread in threads:
+                thread_id = thread.get("id")
+                context = thread.get("context", {})
+                context_type = context.get("type", "")
+                project_id = None
+                if context_type == "project":
+                    project_id = str(context.get("id", ""))
+
+                other_members = [
+                    m for m in thread.get("members", [])
+                    if str(m) != str(FREELANCER_USER_ID)
+                ]
+                sender_id = other_members[0] if other_members else None
+                sender_name = ""
+                if sender_id and str(sender_id) in users:
+                    u = users[str(sender_id)]
+                    sender_name = u.get("display_name") or u.get("username", "")
+
+                prospect = None
+                if project_id:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        db.row_factory = aiosqlite.Row
+                        cursor = await db.execute(
+                            "SELECT id, title, status, quoted_price FROM prospects WHERE platform = 'freelancer' AND platform_job_id = ?",
+                            (project_id,),
+                        )
+                        row = await cursor.fetchone()
+                        if row:
+                            prospect = dict(row)
+
+                messages.append({
+                    "thread_id": thread_id,
+                    "project_id": project_id,
+                    "sender": sender_name,
+                    "sender_id": sender_id,
+                    "message_count": thread.get("message_count", 0),
+                    "is_read": thread.get("is_read", True),
+                    "last_message": thread.get("last_message", {}).get("message", ""),
+                    "last_message_time": thread.get("time_updated"),
+                    "context_type": context_type,
+                    "prospect": prospect,
+                })
+
+            return {"ok": 1, "messages": messages, "count": len(messages)}
+
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+@app.get("/freelancer/thread/{thread_id}")
+async def get_freelancer_thread(thread_id: int, limit: int = 50):
+    """Fetch messages from a specific Freelancer thread."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                params={"limit": limit},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            return {"ok": 1, "messages": data.get("messages", []), "thread_id": thread_id}
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8900)

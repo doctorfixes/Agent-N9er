@@ -214,6 +214,11 @@ async def _run_scan_cycle():
         except Exception as e:
             logger.warning("Post-bid pipeline failed: %s", e)
 
+        try:
+            await _check_freelancer_messages(svc=svc)
+        except Exception as e:
+            logger.warning("Message check failed: %s", e)
+
     return results
 
 
@@ -524,6 +529,55 @@ async def _check_awarded_and_execute(svc=None):
                     logger.info("Payment received for %s: $%.2f", payment.get("title", "")[:40], payment.get("amount_paid", 0))
         except Exception as e:
             logger.warning("Payment check failed: %s", e)
+
+
+async def _check_freelancer_messages(svc=None):
+    """Poll Freelancer messenger for unread messages and notify via Telegram."""
+    if svc is None:
+        svc = _svc_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/freelancer/messages",
+                params={"unread_only": "true", "limit": 10},
+                headers=svc,
+            )
+            if resp.status_code != 200:
+                return
+
+            data = resp.json()
+            messages = data.get("messages", [])
+
+            for msg in messages:
+                if msg.get("is_read"):
+                    continue
+
+                sender = msg.get("sender", "Unknown")
+                preview = (msg.get("last_message", "") or "")[:200]
+                project_id = msg.get("project_id", "")
+                prospect = msg.get("prospect")
+
+                project_info = ""
+                if prospect:
+                    project_info = (
+                        f"Project: {prospect.get('title', 'Unknown')}\n"
+                        f"Status: {prospect.get('status', 'unknown')}\n"
+                        f"Bid: ${prospect.get('quoted_price', 0)}\n"
+                    )
+                elif project_id:
+                    project_info = f"Project ID: {project_id}\n"
+
+                await telegram_notify(
+                    f"NEW MESSAGE on Freelancer\n"
+                    f"From: {sender}\n"
+                    f"{project_info}"
+                    f"Message: {preview}"
+                )
+                logger.info("Freelancer message from %s on project %s", sender, project_id or "direct")
+
+    except Exception as e:
+        logger.warning("Freelancer message check failed: %s", e)
 
 
 @asynccontextmanager

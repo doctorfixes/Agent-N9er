@@ -86,6 +86,7 @@ export default function ProspectsPage() {
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
   const { data: platforms } = useSWR("/api/prospects/platforms", fetcher);
   const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
+  const { data: messages } = useSWR("/api/messages?limit=10", fetcher, { refreshInterval: 30000 });
 
   const handleScan = async (platform) => {
     setScanning(true);
@@ -182,6 +183,38 @@ export default function ProspectsPage() {
           </button>
         ))}
       </div>
+
+      {messages?.messages?.length > 0 && (
+        <div className="panel" style={{ marginBottom: 16 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-cyan)", fontWeight: 600, marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+            <span className="dot info" /> Freelancer Messages ({messages.count})
+          </div>
+          {messages.messages.map((msg) => (
+            <div key={msg.thread_id} style={{
+              padding: "10px 14px", marginBottom: 6, borderRadius: 4,
+              background: msg.is_read ? "var(--bg-input)" : "rgba(6,182,212,0.08)",
+              border: `1px solid ${msg.is_read ? "var(--border)" : "rgba(6,182,212,0.25)"}`,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
+                  {msg.sender || "Unknown"} {!msg.is_read && <span style={{ color: "var(--accent-cyan)", fontSize: 10 }}>NEW</span>}
+                </span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
+                  {msg.last_message_time ? new Date(msg.last_message_time * 1000).toLocaleString() : ""}
+                </span>
+              </div>
+              {msg.prospect && (
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent-cyan)", marginBottom: 4 }}>
+                  {msg.prospect.title} // <span className={`badge ${msg.prospect.status}`} style={{ fontSize: 9, padding: "1px 6px" }}>{msg.prospect.status}</span>
+                </div>
+              )}
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {msg.last_message || "(no preview)"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="panel">
         <table className="data-table">
