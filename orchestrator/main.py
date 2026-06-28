@@ -40,6 +40,9 @@ BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
 FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "true").lower() == "true"
 FREELANCER_MAX_BIDS_PER_MONTH = int(os.getenv("FREELANCER_MAX_BIDS_PER_MONTH", "45"))
+FREELANCER_MAX_BIDS_PER_HOUR = int(os.getenv("FREELANCER_MAX_BIDS_PER_HOUR", "5"))
+FREELANCER_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "50"))
+FREELANCER_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "15000"))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -246,7 +249,49 @@ async def _auto_evaluate_and_bid(svc=None):
             await telegram_notify(f"AUTO-BID PAUSED\nMonthly bid limit reached: {bids_this_month}/{FREELANCER_MAX_BIDS_PER_MONTH}")
             return 0
 
-        prospects = [p for p in all_prospects if not p.get("applied_at")][:remaining]
+        hour_ago = (now - __import__("datetime").timedelta(hours=1)).isoformat()
+        bids_this_hour = 0
+        if applied_resp.status_code == 200:
+            for p in applied_resp.json():
+                if p.get("applied_at", "") >= hour_ago:
+                    bids_this_hour += 1
+        hourly_remaining = FREELANCER_MAX_BIDS_PER_HOUR - bids_this_hour
+        if hourly_remaining <= 0:
+            logger.info("Auto-bid: hourly limit reached (%d/%d), waiting", bids_this_hour, FREELANCER_MAX_BIDS_PER_HOUR)
+            return 0
+
+        effective_limit = min(remaining, hourly_remaining)
+
+        def _is_good_roi(p):
+            bmin = p.get("budget_min", 0) or 0
+            bmax = p.get("budget_max", 0) or 0
+            budget = bmax or bmin
+            if budget < FREELANCER_MIN_BUDGET:
+                return False
+            if budget > FREELANCER_MAX_BUDGET:
+                return False
+            desc = (p.get("description") or "").lower()
+            title = (p.get("title") or "").lower()
+            low_value_signals = [
+                "for free", "no budget", "volunteer", "unpaid",
+                "test project", "just testing", "looking for cheapest",
+            ]
+            for signal in low_value_signals:
+                if signal in desc or signal in title:
+                    return False
+            vague_titles = ["i need", "help me", "do this", "project", "work"]
+            if title.strip() in vague_titles:
+                return False
+            return True
+
+        candidates = [p for p in all_prospects if not p.get("applied_at")]
+        qualified = [p for p in candidates if _is_good_roi(p)]
+        skipped = len(candidates) - len(qualified)
+        if skipped > 0:
+            logger.info("Auto-bid: filtered out %d low-ROI prospects", skipped)
+
+        qualified.sort(key=lambda p: (p.get("budget_max", 0) or p.get("budget_min", 0) or 0), reverse=True)
+        prospects = qualified[:effective_limit]
 
         logger.info("Auto-bid: %d approved Freelancer prospects without bids (%d/%d monthly limit)", len(prospects), bids_this_month, FREELANCER_MAX_BIDS_PER_MONTH)
         for prospect in prospects:
