@@ -17,6 +17,7 @@ from shared.security import (
     get_service_headers,
 )
 from shared.task_taxonomy import get_specialization_boost, list_categories
+from shared.ethics import screen_project, screen_deliverable, add_transparency_notice
 from shared.config import (
     DEFAULT_TIMEOUT, PIPELINE_TIMEOUT,
     QUICK_TIMEOUT, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
@@ -204,6 +205,12 @@ async def _run_scan_cycle():
         except Exception as e:
             logger.warning("Auto-bid cycle failed: %s", e)
 
+    if FREELANCER_AUTO_BID:
+        try:
+            await _check_awarded_and_execute(svc=svc)
+        except Exception as e:
+            logger.warning("Post-bid pipeline failed: %s", e)
+
     return results
 
 
@@ -245,6 +252,25 @@ async def _auto_evaluate_and_bid(svc=None):
         for prospect in prospects:
             pid = prospect["id"]
             try:
+                ethics = screen_project(
+                    prospect.get("title", ""),
+                    prospect.get("description", ""),
+                    prospect.get("skills", ""),
+                )
+                if not ethics["allowed"]:
+                    logger.warning("ETHICS BLOCK: %s -- %s", prospect.get("title", "")[:60], ethics["flags"])
+                    await client.patch(
+                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                        json={"status": "rejected"},
+                        headers=svc,
+                    )
+                    await telegram_notify(
+                        f"PROJECT BLOCKED (ethics)\n"
+                        f"Title: {prospect.get('title', 'Unknown')}\n"
+                        f"Flags: {', '.join(ethics['flags'])}"
+                    )
+                    continue
+
                 budget_min = prospect.get("budget_min", 0) or 0
                 budget_max = prospect.get("budget_max", 0) or 0
                 quoted = prospect.get("quoted_price", 0) or 0
@@ -306,6 +332,153 @@ async def _auto_evaluate_and_bid(svc=None):
                 logger.warning("Auto-bid error for %s: %s", pid[:8], e)
             await asyncio.sleep(2)
     return bids_placed
+
+
+async def _check_awarded_and_execute(svc=None):
+    """Check for awarded bids, execute work, deliver, and track payments."""
+    if svc is None:
+        svc = _svc_headers()
+
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        # 1. Check for newly awarded bids
+        try:
+            awarded_resp = await client.get(
+                f"{PROSPECTOR_URL}/freelancer/check-awarded",
+                headers=svc,
+            )
+            if awarded_resp.status_code == 200:
+                awarded = awarded_resp.json().get("awarded", [])
+                for award in awarded:
+                    logger.info("BID AWARDED: %s", award.get("title", ""))
+                    await telegram_notify(
+                        f"BID ACCEPTED!\n"
+                        f"Project: {award.get('title', 'Unknown')}\n"
+                        f"Amount: ${award.get('bid_amount', 0):.2f}\n"
+                        f"Starting execution..."
+                    )
+        except Exception as e:
+            logger.warning("Awarded check failed: %s", e)
+
+        # 2. Execute work for hired prospects
+        try:
+            hired_resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "hired", "platform": "freelancer", "limit": 10},
+                headers=svc,
+            )
+            if hired_resp.status_code == 200:
+                for prospect in hired_resp.json():
+                    pid = prospect["id"]
+                    title = prospect.get("title", "Unknown")
+
+                    ethics = screen_project(
+                        title,
+                        prospect.get("description", ""),
+                        prospect.get("skills", ""),
+                    )
+                    if not ethics["allowed"]:
+                        logger.warning("ETHICS BLOCK on hired project: %s -- %s", title[:60], ethics["flags"])
+                        await telegram_notify(
+                            f"EXECUTION BLOCKED (ethics)\n"
+                            f"Project: {title}\n"
+                            f"Flags: {', '.join(ethics['flags'])}\n"
+                            f"Manual review required."
+                        )
+                        continue
+
+                    await client.patch(
+                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                        json={"status": "executing"},
+                        headers=svc,
+                    )
+
+                    try:
+                        exec_resp = await client.post(
+                            f"{EXECUTION_URL}/execute",
+                            json={
+                                "task_id": pid,
+                                "agent_id": "agent-n9er-primary",
+                                "objective": prospect.get("title", ""),
+                                "description": prospect.get("description", ""),
+                                "complexity": "moderate",
+                                "confidence": 0.8,
+                                "tier": "deepseek_flash",
+                            },
+                            headers=svc,
+                            timeout=60.0,
+                        )
+
+                        if exec_resp.status_code == 200 and exec_resp.json().get("success"):
+                            output_resp = await client.get(
+                                f"{EXECUTION_URL}/executions/{pid}/output",
+                                headers=svc,
+                            )
+                            deliverable = ""
+                            if output_resp.status_code == 200:
+                                deliverable = output_resp.json().get("output", "")
+
+                            deliverable_check = screen_deliverable(deliverable)
+                            if not deliverable_check["allowed"]:
+                                logger.warning("DELIVERABLE BLOCKED: %s -- %s", title[:60], deliverable_check["flags"])
+                                await telegram_notify(
+                                    f"DELIVERABLE BLOCKED (safety)\n"
+                                    f"Project: {title}\n"
+                                    f"Reason: {deliverable_check['reasons'][0] if deliverable_check['reasons'] else 'Unknown'}\n"
+                                    f"Manual review required."
+                                )
+                                continue
+
+                            deliverable = add_transparency_notice(deliverable, "markdown")
+
+                            try:
+                                await client.post(
+                                    f"{PROSPECTOR_URL}/freelancer/deliver-milestone",
+                                    params={"prospect_id": pid, "deliverable": deliverable[:5000]},
+                                    headers=svc,
+                                )
+                            except Exception as de:
+                                logger.warning("Milestone delivery failed for %s: %s", pid[:8], de)
+                                await client.patch(
+                                    f"{PROSPECTOR_URL}/prospects/{pid}",
+                                    json={"status": "delivered"},
+                                    headers=svc,
+                                )
+
+                            await telegram_notify(
+                                f"WORK DELIVERED\n"
+                                f"Project: {title}\n"
+                                f"Awaiting payment release."
+                            )
+                            logger.info("Executed and delivered: %s", title[:60])
+                        else:
+                            logger.warning("Execution failed for %s", pid[:8])
+                            await telegram_notify(
+                                f"EXECUTION FAILED\n"
+                                f"Project: {title}\n"
+                                f"Manual intervention may be needed."
+                            )
+                    except Exception as ee:
+                        logger.warning("Execution error for %s: %s", pid[:8], ee)
+        except Exception as e:
+            logger.warning("Hired prospect processing failed: %s", e)
+
+        # 3. Check for payments on delivered work
+        try:
+            pay_resp = await client.get(
+                f"{PROSPECTOR_URL}/freelancer/check-payments",
+                headers=svc,
+            )
+            if pay_resp.status_code == 200:
+                payments = pay_resp.json().get("paid", [])
+                for payment in payments:
+                    await telegram_notify(
+                        f"PAYMENT RECEIVED!\n"
+                        f"Project: {payment.get('title', 'Unknown')}\n"
+                        f"Amount: ${payment.get('amount_paid', 0):.2f}"
+                    )
+                    logger.info("Payment received for %s: $%.2f", payment.get("title", "")[:40], payment.get("amount_paid", 0))
+        except Exception as e:
+            logger.warning("Payment check failed: %s", e)
 
 
 @asynccontextmanager

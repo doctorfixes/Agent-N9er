@@ -1472,6 +1472,180 @@ async def freelancer_status():
     }
 
 
+@app.get("/freelancer/check-awarded")
+async def check_freelancer_awarded():
+    """Poll Freelancer API for bids that have been accepted (awarded)."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+
+    awarded = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                params={
+                    "bidders[]": FREELANCER_USER_ID,
+                    "bid_statuses[]": "awarded",
+                },
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            bids = resp.json().get("result", {}).get("bids", [])
+
+            for bid in bids:
+                project_id = str(bid.get("project_id", ""))
+                prospect = None
+                async with aiosqlite.connect(DB_PATH) as db:
+                    db.row_factory = aiosqlite.Row
+                    cursor = await db.execute(
+                        "SELECT * FROM prospects WHERE platform = 'freelancer' AND platform_job_id = ?",
+                        (project_id,),
+                    )
+                    row = await cursor.fetchone()
+                    if row:
+                        prospect = dict(row)
+
+                if prospect and prospect["status"] == "applied":
+                    await _update_status(prospect["id"], "hired")
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE prospects SET hired_at = ? WHERE id = ?",
+                            (datetime.utcnow().isoformat(), prospect["id"]),
+                        )
+                        await db.commit()
+                    awarded.append({
+                        "prospect_id": prospect["id"],
+                        "project_id": project_id,
+                        "title": prospect["title"],
+                        "bid_amount": bid.get("amount", 0),
+                    })
+                    logger.info("Freelancer bid AWARDED: project=%s title=%s", project_id, prospect["title"])
+
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer awarded check failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Freelancer API error: {e}")
+
+    return {"ok": 1, "awarded": awarded, "count": len(awarded)}
+
+
+@app.post("/freelancer/deliver-milestone")
+async def deliver_freelancer_milestone(prospect_id: str, deliverable: str):
+    """Submit milestone completion on Freelancer for a hired project."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=422, detail="Not a Freelancer prospect")
+
+    project_id = prospect["platform_job_id"]
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            ms_resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+                params={"projects[]": project_id, "statuses[]": "created"},
+                headers=_freelancer_headers(),
+            )
+            ms_resp.raise_for_status()
+            milestones = ms_resp.json().get("result", {}).get("milestones", [])
+
+            if not milestones:
+                logger.info("No active milestones for project %s, posting deliverable as message", project_id)
+                await _update_status(prospect_id, "delivered")
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prospects SET delivered_at = ? WHERE id = ?",
+                        (datetime.utcnow().isoformat(), prospect_id),
+                    )
+                    await db.commit()
+                return {"ok": 1, "method": "status_update", "message": "Marked as delivered (no milestones found)"}
+
+            milestone = milestones[0]
+            milestone_id = milestone.get("id")
+
+            submit_resp = await client.put(
+                f"{FREELANCER_API_BASE}/projects/0.1/milestones/{milestone_id}/",
+                headers=_freelancer_headers(),
+                json={"action": "request_release", "reason": deliverable[:5000]},
+            )
+            submit_resp.raise_for_status()
+
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        logger.error("Freelancer milestone delivery failed for %s: %s", project_id, error_msg)
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+    await _update_status(prospect_id, "delivered")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE prospects SET delivered_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), prospect_id),
+        )
+        await db.commit()
+
+    logger.info("Freelancer milestone delivered: project=%s milestone=%s", project_id, milestone_id)
+    return {"ok": 1, "method": "milestone_release", "milestone_id": milestone_id}
+
+
+@app.get("/freelancer/check-payments")
+async def check_freelancer_payments():
+    """Check for completed payments on delivered Freelancer projects."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+
+    paid = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM prospects WHERE platform = 'freelancer' AND status = 'delivered'"
+        )
+        delivered = [dict(row) for row in await cursor.fetchall()]
+
+    if not delivered:
+        return {"ok": 1, "paid": [], "count": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for prospect in delivered:
+                project_id = prospect["platform_job_id"]
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+                    params={"projects[]": project_id, "statuses[]": "released"},
+                    headers=_freelancer_headers(),
+                )
+                if resp.status_code == 200:
+                    released = resp.json().get("result", {}).get("milestones", [])
+                    if released:
+                        total_paid = sum(m.get("amount", 0) for m in released)
+                        await _update_status(prospect["id"], "paid")
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE prospects SET paid_at = ?, actual_cost = ? WHERE id = ?",
+                                (datetime.utcnow().isoformat(), total_paid, prospect["id"]),
+                            )
+                            await db.commit()
+                        paid.append({
+                            "prospect_id": prospect["id"],
+                            "project_id": project_id,
+                            "title": prospect["title"],
+                            "amount_paid": total_paid,
+                        })
+                        logger.info("Payment received: project=%s amount=$%.2f", project_id, total_paid)
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer payment check failed: %s", e)
+
+    return {"ok": 1, "paid": paid, "count": len(paid)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8900)

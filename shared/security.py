@@ -107,3 +107,39 @@ def get_service_headers() -> dict:
     if SERVICE_TOKEN:
         headers["X-Service-Token"] = SERVICE_TOKEN
     return headers
+
+
+def sanitize_input(value: str, max_length: int = 10000) -> str:
+    """Sanitize user-provided input to prevent injection attacks."""
+    if not isinstance(value, str):
+        return str(value)[:max_length]
+    value = value[:max_length]
+    value = value.replace("\x00", "")
+    return value
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """Log all mutating requests for audit trail."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            client_ip = request.client.host if request.client else "unknown"
+            logger.info(
+                "AUDIT: %s %s from %s",
+                request.method, request.url.path, client_ip,
+            )
+        response = await call_next(request)
+        return response
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Cache-Control"] = "no-store"
+        return response
