@@ -45,6 +45,10 @@ UPWORK_SEARCH_CATEGORIES = os.getenv(
 GITHUB_API = "https://api.github.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
+FREELANCER_API_BASE = "https://www.freelancer.com/api"
+FREELANCER_TOKEN = os.getenv("FREELANCER_TOKEN", "")
+BID_REQUIRE_APPROVAL = os.getenv("BID_REQUIRE_APPROVAL", "true").lower() == "true"
+
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
     "hired", "executing", "delivered", "paid", "rated", "rejected",
@@ -183,6 +187,14 @@ class ScanRequest(BaseModel):
 class ProspectUpdate(BaseModel):
     status: str
     notes: str = ""
+
+
+class BidSubmission(BaseModel):
+    prospect_id: str
+    amount: float
+    period: int = 7
+    milestone_percentage: float = 100
+    description: str = ""
 
 
 def _svc_headers():
@@ -1194,6 +1206,165 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
 
     logger.info("Prospect %s → %s", prospect_id[:8], update.status)
     return {"ok": 1, "prospect_id": prospect_id, "status": update.status}
+
+
+# ---------------------------------------------------------------------------
+# Freelancer bid submission
+# ---------------------------------------------------------------------------
+
+_pending_bids = {}
+
+
+@app.post("/prospects/{prospect_id}/bid")
+async def submit_bid(prospect_id: str, bid: BidSubmission):
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=400, detail=f"Bid submission not supported for platform: {prospect['platform']}")
+
+    if not FREELANCER_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_TOKEN not configured")
+
+    project_id = prospect.get("platform_job_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="No platform job ID for this prospect")
+
+    bid_data = {
+        "prospect_id": prospect_id,
+        "project_id": project_id,
+        "title": prospect["title"],
+        "amount": bid.amount,
+        "period": bid.period,
+        "milestone_percentage": bid.milestone_percentage,
+        "description": bid.description,
+    }
+
+    if BID_REQUIRE_APPROVAL:
+        bid_id = str(uuid.uuid4())
+        _pending_bids[bid_id] = bid_data
+        logger.info("Bid %s pending approval: %s ($%.2f)", bid_id[:8], prospect["title"][:40], bid.amount)
+        return {
+            "ok": 1,
+            "status": "pending_approval",
+            "bid_id": bid_id,
+            "detail": "Bid requires approval. Use POST /bids/{bid_id}/approve to submit.",
+            **bid_data,
+        }
+
+    return await _submit_freelancer_bid(prospect_id, project_id, bid, bid.description)
+
+
+@app.get("/bids/pending")
+async def list_pending_bids():
+    return list(_pending_bids.values()) if _pending_bids else []
+
+
+@app.post("/bids/{bid_id}/approve")
+async def approve_bid(bid_id: str):
+    bid_data = _pending_bids.pop(bid_id, None)
+    if not bid_data:
+        raise HTTPException(status_code=404, detail="Pending bid not found or already processed")
+
+    prospect_id = bid_data["prospect_id"]
+    project_id = bid_data["project_id"]
+
+    bid_req = BidSubmission(
+        prospect_id=prospect_id,
+        amount=bid_data["amount"],
+        period=bid_data["period"],
+        milestone_percentage=bid_data["milestone_percentage"],
+        description=bid_data["description"],
+    )
+
+    return await _submit_freelancer_bid(prospect_id, project_id, bid_req, bid_data["description"])
+
+
+@app.post("/bids/{bid_id}/reject")
+async def reject_bid(bid_id: str):
+    bid_data = _pending_bids.pop(bid_id, None)
+    if not bid_data:
+        raise HTTPException(status_code=404, detail="Pending bid not found or already processed")
+    logger.info("Bid rejected: %s", bid_data.get("title", "")[:40])
+    return {"ok": 1, "status": "rejected", "bid_id": bid_id}
+
+
+async def _submit_freelancer_bid(prospect_id: str, project_id: str, bid: BidSubmission, description: str) -> dict:
+    headers = {
+        "Freelancer-OAuth-V1": FREELANCER_TOKEN,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "project_id": int(project_id),
+        "amount": bid.amount,
+        "period": bid.period,
+        "milestone_percentage": bid.milestone_percentage,
+        "description": description,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            await _update_status(prospect_id, "applied")
+
+            logger.info("Bid submitted for prospect %s: project=%s amount=$%.2f",
+                        prospect_id[:8], project_id, bid.amount)
+
+            return {
+                "ok": 1,
+                "status": "submitted",
+                "prospect_id": prospect_id,
+                "project_id": project_id,
+                "amount": bid.amount,
+                "period": bid.period,
+                "freelancer_response": result.get("result", {}),
+            }
+
+    except httpx.HTTPStatusError as e:
+        error_body = {}
+        try:
+            error_body = e.response.json()
+        except Exception:
+            pass
+        logger.error("Freelancer bid submission failed: %s %s", e.response.status_code, error_body)
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Freelancer API error: {error_body.get('message', str(e))}",
+        )
+    except httpx.RequestError as e:
+        logger.error("Freelancer API unreachable: %s", e)
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+async def _update_status(prospect_id: str, status: str):
+    timestamp_field = {
+        "applied": "applied_at",
+        "hired": "hired_at",
+        "delivered": "delivered_at",
+        "paid": "paid_at",
+    }.get(status)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        if timestamp_field:
+            await db.execute(
+                f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
+                (status, datetime.utcnow().isoformat(), prospect_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE prospects SET status = ? WHERE id = ?",
+                (status, prospect_id),
+            )
+        await db.commit()
 
 
 @app.get("/stats")

@@ -460,6 +460,88 @@ def _simulated_proposal(req: ProposalRequest) -> dict:
     }
 
 
+class QuoteRequest(BaseModel):
+    prospect_id: str = ""
+    title: str = ""
+    description: str = ""
+    platform: str = "freelancer"
+    budget_min: float = 0
+    budget_max: float = 0
+    skills: str = ""
+    client_message: str = ""
+    conversation: list = []
+
+
+@app.post("/quote")
+async def generate_quote(req: QuoteRequest):
+    if not has_available_provider():
+        return _simulated_quote(req)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Agent N9er, an AI freelance agent responding to a client on "
+                f"{req.platform}. The client has responded to your bid and is asking for a quote or more details.\n\n"
+                f"Job: {req.title}\n"
+                f"Description: {req.description}\n"
+                f"Required Skills: {req.skills}\n"
+                f"Budget Range: ${req.budget_min}-${req.budget_max}\n\n"
+                "Write a professional reply that:\n"
+                "1) Addresses the client's message directly\n"
+                "2) Provides a clear quote with pricing breakdown if asked\n"
+                "3) Outlines deliverables and timeline\n"
+                "4) Asks any clarifying questions if needed\n"
+                "Keep it conversational but professional. Under 250 words."
+            ),
+        },
+    ]
+
+    for msg in req.conversation:
+        messages.append({
+            "role": msg.get("role", "user"),
+            "content": msg.get("content", ""),
+        })
+
+    if req.client_message:
+        messages.append({"role": "user", "content": f"Client says: {req.client_message}"})
+
+    try:
+        result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        return {
+            "ok": 1,
+            "prospect_id": req.prospect_id,
+            "reply": result.content,
+            "mode": "live",
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "tokens": result.input_tokens + result.output_tokens,
+        }
+    except Exception as e:
+        logger.error("Quote generation failed: %s", e)
+        return _simulated_quote(req)
+
+
+def _simulated_quote(req: QuoteRequest) -> dict:
+    price = req.budget_min if req.budget_min > 0 else 50
+    return {
+        "ok": 1,
+        "prospect_id": req.prospect_id,
+        "reply": (
+            f"Thank you for your interest! Based on the requirements for \"{req.title}\", "
+            f"I'd like to propose a quote of ${price:.0f}. "
+            "This includes thorough analysis of the requirements, implementation, "
+            "testing, and one round of revisions. "
+            "I can deliver within 5-7 business days. "
+            "Would you like to discuss any specific aspects of the project?"
+        ),
+        "mode": "simulation",
+        "model": "none",
+        "cost_usd": 0,
+        "tokens": 0,
+    }
+
+
 @app.post("/format-deliverable")
 async def format_deliverable(payload: dict):
     task_id = payload.get("task_id", "")
