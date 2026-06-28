@@ -339,7 +339,7 @@ class TestAuditLog:
 
     async def test_award_creates_audit_entry(self, mp_client):
         await mp_client.post("/publish", json={"id": "aud3", "objective": "test"})
-        await mp_client.post("/bid", json={"task_id": "aud3", "agent_id": "a1", "confidence": 0.8})
+        await mp_client.post("/bid", json={"task_id": "aud3", "agent_id": "a1", "confidence": 0.8, "require_approval": False})
         await mp_client.post("/award/aud3")
         log = (await mp_client.get("/audit")).json()
         award_entries = [e for e in log if e["entity_id"] == "aud3" and e["action"] == "award"]

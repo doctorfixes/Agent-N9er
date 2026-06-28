@@ -105,12 +105,31 @@ async def test_full_pipeline(client):
 
     mock_client, _, _ = _mock_pipeline()
     with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
-        resp = await client.post("/pipeline/full", json={"objective": "test"})
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+            resp = await client.post("/pipeline/full", json={"objective": "test"})
 
     data = resp.json()
     assert data["status"] in ("completed", "failed")
     assert "winner" in data
     assert "execution" in data
+
+
+async def test_full_pipeline_pending_approval(client):
+    async with orch._agents_lock:
+        orch.registered_agents["a1"] = {
+            "agent_id": "a1", "profile": "speed", "specialization": "generalist",
+            "price": 0.1, "eta_minutes": 2, "confidence": 0.8,
+        }
+
+    mock_client, _, _ = _mock_pipeline()
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch, "BID_REQUIRE_APPROVAL", True):
+            resp = await client.post("/pipeline/full", json={"objective": "test"})
+
+    data = resp.json()
+    assert data["status"] == "pending_approval"
+    assert data["pending_bids"] == 1
+    assert "task_id" in data
 
 
 async def test_full_pipeline_no_agents(client):

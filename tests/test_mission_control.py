@@ -223,7 +223,8 @@ class TestMultiAgentBidding:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
-            resp = await orch_client.post("/pipeline/full", json={"objective": "test multi"})
+            with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+                resp = await orch_client.post("/pipeline/full", json={"objective": "test multi"})
 
         data = resp.json()
         assert data["status"] == "completed"

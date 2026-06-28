@@ -20,7 +20,7 @@ from shared.task_taxonomy import get_specialization_boost, list_categories
 from shared.config import (
     DEFAULT_TIMEOUT, PIPELINE_TIMEOUT,
     QUICK_TIMEOUT, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
-    CORS_ORIGINS,
+    CORS_ORIGINS, BID_REQUIRE_APPROVAL,
 )
 from shared.retry import retry_post
 
@@ -335,6 +335,7 @@ async def full_pipeline(task: dict):
                     "price": agent_info.get("price", 0.1),
                     "eta_minutes": agent_info.get("eta_minutes", 5),
                     "confidence": round(adjusted_confidence, 3),
+                    "require_approval": BID_REQUIRE_APPROVAL,
                 }
                 try:
                     await client.post(f"{MARKETPLACE_URL}/bid", json=bid_payload, headers=svc)
@@ -344,6 +345,17 @@ async def full_pipeline(task: dict):
             await asyncio.gather(*[
                 _submit_bid(aid, ainfo) for aid, ainfo in agents_snapshot.items()
             ])
+
+            if BID_REQUIRE_APPROVAL:
+                logger.info("Task %s [%s]: bids pending approval from %d agents",
+                            task_id, category, len(agents_snapshot))
+                return {
+                    "status": "pending_approval",
+                    "task_id": task_id,
+                    "category": category,
+                    "pending_bids": len(agents_snapshot),
+                    "detail": "Bids require human approval. Use POST /pipeline/{task_id}/approve to approve and continue.",
+                }
 
             award_resp = await retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
             award_data = award_resp.json()
@@ -381,6 +393,56 @@ async def full_pipeline(task: dict):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+@app.post("/pipeline/{task_id}/approve")
+async def approve_pipeline_bids(task_id: str):
+    """Approve pending bids for a task and continue the pipeline (award + execute)."""
+    try:
+        svc = _svc_headers()
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            approve_resp = await retry_post(
+                client, f"{MARKETPLACE_URL}/bids/approve-all/{task_id}", headers=svc,
+            )
+            approve_data = approve_resp.json()
+
+            if approve_data.get("approved_count", 0) == 0:
+                raise HTTPException(status_code=404, detail="No pending bids to approve for this task")
+
+            award_resp = await retry_post(client, f"{MARKETPLACE_URL}/award/{task_id}", headers=svc)
+            award_data = award_resp.json()
+            winner = award_data["winner"]
+
+            exec_resp = await retry_post(client, f"{EXECUTION_URL}/execute", json={
+                "task_id": task_id,
+                "agent_id": winner["agent_id"],
+                "confidence": winner.get("confidence", 0.5),
+            }, headers=svc)
+            exec_data = exec_resp.json()
+
+            status = "completed" if exec_data.get("success") else "failed"
+            await client.post(
+                f"{MARKETPLACE_URL}/complete/{task_id}",
+                json={"success": exec_data.get("success", False)},
+                headers=svc,
+            )
+
+            logger.info("Approved pipeline for task %s: %s (agent %s)",
+                        task_id, status, winner["agent_id"])
+            return {
+                "status": status,
+                "task_id": task_id,
+                "approved_bids": approve_data.get("approved_count", 0),
+                "winner": winner,
+                "execution": exec_data,
+            }
+
+    except httpx.HTTPStatusError as e:
+        logger.error("Approve pipeline failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+    except httpx.RequestError as e:
+        logger.error("Service unreachable during approval: %s", e)
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 @app.post("/process-recurring")
 async def process_recurring():
     try:
@@ -411,6 +473,7 @@ class RevenuePipelineRequest(BaseModel):
     category: str = ""
     max_results: int = 10
     auto_execute: bool = True
+    require_approval: bool | None = None
     client_email: str = ""
 
 
@@ -482,8 +545,12 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                     prospect_result["estimated_cost"] = cost
                     prospect_result["complexity"] = evaluation.get("complexity", "")
 
-                    # 3. Execute if auto_execute
-                    if req.auto_execute:
+                    # 3. Execute if auto_execute and approval not required
+                    needs_approval = req.require_approval if req.require_approval is not None else BID_REQUIRE_APPROVAL
+                    if needs_approval:
+                        prospect_result["status"] = "pending_approval"
+                        prospect_result["detail"] = "Human approval required before execution"
+                    elif req.auto_execute:
                         exec_resp = await client.post(
                             f"{EXECUTION_URL}/execute",
                             json={

@@ -64,8 +64,8 @@ async def test_get_bids(client):
 
 async def test_award_task(client):
     await client.post("/publish", json={"id": "t50", "objective": "x"})
-    await client.post("/bid", json={"task_id": "t50", "agent_id": "a1", "confidence": 0.6})
-    await client.post("/bid", json={"task_id": "t50", "agent_id": "a2", "confidence": 0.9})
+    await client.post("/bid", json={"task_id": "t50", "agent_id": "a1", "confidence": 0.6, "require_approval": False})
+    await client.post("/bid", json={"task_id": "t50", "agent_id": "a2", "confidence": 0.9, "require_approval": False})
     result = (await client.post("/award/t50")).json()
     assert result["winner"]["agent_id"] == "a2"
 
@@ -124,3 +124,77 @@ async def test_duplicate_bid_replaces(client):
     agent_bids = [b for b in bids if b["agent_id"] == "a1"]
     assert len(agent_bids) == 1
     assert agent_bids[0]["confidence"] == 0.9
+
+
+# --- Human-in-the-loop approval tests ---
+
+async def test_bid_defaults_to_pending_approval(client):
+    await client.post("/publish", json={"id": "ap1", "objective": "x"})
+    resp = await client.post("/bid", json={"task_id": "ap1", "agent_id": "a1", "confidence": 0.7})
+    data = resp.json()
+    assert data["status"] == "pending_approval"
+
+
+async def test_bid_skip_approval(client):
+    await client.post("/publish", json={"id": "ap2", "objective": "x"})
+    resp = await client.post("/bid", json={"task_id": "ap2", "agent_id": "a1", "confidence": 0.7, "require_approval": False})
+    data = resp.json()
+    assert data["status"] == "submitted"
+
+
+async def test_list_pending_bids(client):
+    await client.post("/publish", json={"id": "ap3", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap3", "agent_id": "a1", "confidence": 0.7})
+    await client.post("/bid", json={"task_id": "ap3", "agent_id": "a2", "confidence": 0.8})
+    pending = (await client.get("/bids/pending")).json()
+    pending_for_task = [b for b in pending if b["task_id"] == "ap3"]
+    assert len(pending_for_task) == 2
+
+
+async def test_approve_bid(client):
+    await client.post("/publish", json={"id": "ap4", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap4", "agent_id": "a1", "confidence": 0.7})
+    pending = (await client.get("/bids/pending")).json()
+    bid = next(b for b in pending if b["task_id"] == "ap4")
+
+    resp = await client.post(f"/bids/{bid['id']}/approve")
+    assert resp.json()["status"] == "submitted"
+
+    result = (await client.post("/award/ap4")).json()
+    assert result["winner"]["agent_id"] == "a1"
+
+
+async def test_reject_bid(client):
+    await client.post("/publish", json={"id": "ap5", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap5", "agent_id": "a1", "confidence": 0.7})
+    pending = (await client.get("/bids/pending")).json()
+    bid = next(b for b in pending if b["task_id"] == "ap5")
+
+    resp = await client.post(f"/bids/{bid['id']}/reject")
+    assert resp.json()["status"] == "rejected"
+
+    award_resp = await client.post("/award/ap5")
+    assert award_resp.status_code == 404
+
+
+async def test_approve_all_bids_for_task(client):
+    await client.post("/publish", json={"id": "ap6", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap6", "agent_id": "a1", "confidence": 0.6})
+    await client.post("/bid", json={"task_id": "ap6", "agent_id": "a2", "confidence": 0.9})
+
+    resp = await client.post("/bids/approve-all/ap6")
+    data = resp.json()
+    assert data["approved_count"] == 2
+
+    result = (await client.post("/award/ap6")).json()
+    assert result["winner"]["agent_id"] == "a2"
+
+
+async def test_cannot_approve_already_submitted_bid(client):
+    await client.post("/publish", json={"id": "ap7", "objective": "x"})
+    await client.post("/bid", json={"task_id": "ap7", "agent_id": "a1", "confidence": 0.7, "require_approval": False})
+    bids = (await client.get("/bids/ap7")).json()
+    bid = bids[0]
+
+    resp = await client.post(f"/bids/{bid['id']}/approve")
+    assert resp.status_code == 409

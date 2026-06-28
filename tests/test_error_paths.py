@@ -171,7 +171,8 @@ class TestFullPipelineErrors:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
-            resp = await client.post("/pipeline/full", json={"objective": "test"})
+            with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+                resp = await client.post("/pipeline/full", json={"objective": "test"})
 
         assert resp.status_code == 502
 
@@ -206,7 +207,8 @@ class TestFullPipelineErrors:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
-            resp = await client.post("/pipeline/full", json={"objective": "test"})
+            with patch.object(orch, "BID_REQUIRE_APPROVAL", False):
+                resp = await client.post("/pipeline/full", json={"objective": "test"})
 
         assert resp.status_code == 503
 
