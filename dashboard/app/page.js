@@ -52,6 +52,10 @@ export default function MissionControl() {
   const { data: agents } = useSWR("/api/agents", fetcher, { refreshInterval: 10000 });
   const { data: analytics } = useSWR("/api/analytics?days=1", fetcher, { refreshInterval: 30000 });
   const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
+  const { data: pipelineStats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 10000 });
+  const { data: messages } = useSWR("/api/messages?limit=5", fetcher, { refreshInterval: 15000 });
+  const { data: autoReply } = useSWR("/api/auto-reply", fetcher, { refreshInterval: 15000 });
+  const { data: revenue } = useSWR("/api/revenue", fetcher, { refreshInterval: 30000 });
 
   const addActivity = (msg, type = "info") => {
     const entry = { time: new Date().toLocaleTimeString("en-US", { hour12: false }), msg, type };
@@ -129,11 +133,13 @@ export default function MissionControl() {
   return (
     <div>
       <div className="metric-grid" style={{ marginBottom: 16 }}>
-        <Metric label="Services Online" value={`${onlineServices}/${services.length}`} color={onlineServices === services.length ? "green" : "red"} sub={onlineServices === services.length ? "All nominal" : "Degraded"} />
-        <Metric label="Active Tasks" value={activeCount} color="cyan" sub="In pipeline" />
-        <Metric label="Completed" value={completedCount} color="green" sub="Total success" />
-        <Metric label="Failed" value={failedCount} color="red" />
-        <Metric label="Agents" value={agentEntries.length} color="blue" sub="Registered" />
+        <Metric label="Services" value={`${onlineServices}/${services.length}`} color={onlineServices === services.length ? "green" : "red"} sub={onlineServices === services.length ? "Nominal" : "Degraded"} />
+        <Metric label="Prospects" value={pipelineStats?.total_prospects ?? 0} color="cyan" sub={`${pipelineStats?.by_status?.approved ?? 0} approved`} />
+        <Metric label="Bids Out" value={pipelineStats?.by_status?.applied ?? 0} color="blue" sub="Awaiting response" />
+        <Metric label="Hired" value={pipelineStats?.by_status?.hired ?? 0} color="green" sub="Ready to execute" />
+        <Metric label="Executing" value={pipelineStats?.by_status?.executing ?? 0} color="purple" sub="In progress" />
+        <Metric label="Delivered" value={pipelineStats?.by_status?.delivered ?? 0} color="amber" sub="Awaiting payment" />
+        <Metric label="Paid" value={pipelineStats?.by_status?.paid ?? 0} color="green" sub={`$${pipelineStats?.revenue ?? 0}`} />
         <Metric label="Exec / 24h" value={analytics?.total_executions ?? 0} color="purple" sub={`${((analytics?.success_rate ?? 0) * 100).toFixed(0)}% success`} />
       </div>
 
@@ -236,6 +242,63 @@ export default function MissionControl() {
                 Awaiting system events...
               </div>
             )}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="cmd-grid main-layout" style={{ marginBottom: 16 }}>
+        <Panel title="Freelancer Operations" dot="info">
+          {autoReply && (
+            <div style={{ padding: "6px 10px", marginBottom: 10, borderRadius: 4, fontSize: 10, fontFamily: "var(--font-mono)", background: autoReply.enabled ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)", border: `1px solid ${autoReply.enabled ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)"}`, color: autoReply.enabled ? "#34d399" : "#f87171" }}>
+              AUTO-REPLY: {autoReply.enabled ? "ON" : "OFF"} // DELAY: {autoReply.delay_seconds}s // PENDING: {autoReply.pending_replies} // TELEGRAM: {autoReply.telegram_commands ? "ON" : "OFF"}
+            </div>
+          )}
+          {messages?.messages?.length > 0 ? messages.messages.map((msg) => (
+            <div key={msg.thread_id} style={{ padding: "8px 12px", marginBottom: 6, borderRadius: 4, background: msg.is_read ? "var(--bg-input)" : "rgba(6,182,212,0.08)", border: `1px solid ${msg.is_read ? "var(--border)" : "rgba(6,182,212,0.25)"}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                  {msg.sender} {!msg.is_read && <span style={{ color: "var(--accent-cyan)", fontSize: 9 }}>NEW</span>}
+                </span>
+                <span style={{ color: "var(--text-muted)", fontSize: 9 }}>{msg.last_message_time ? new Date(msg.last_message_time * 1000).toLocaleTimeString() : ""}</span>
+              </div>
+              {msg.prospect && <div style={{ fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--accent-cyan)", marginTop: 2 }}>{msg.prospect.title} // <span className={`badge ${msg.prospect.status}`} style={{ fontSize: 8, padding: "0 4px" }}>{msg.prospect.status}</span></div>}
+              <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{msg.last_message || "(no preview)"}</div>
+            </div>
+          )) : (
+            <div style={{ textAlign: "center", padding: 20, color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>No active conversations</div>
+          )}
+        </Panel>
+
+        <Panel title="Pipeline Flow" dot="">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[
+              { label: "Discovered", key: "discovered", color: "var(--text-muted)" },
+              { label: "Approved", key: "approved", color: "var(--accent-green)" },
+              { label: "Bids Placed", key: "applied", color: "var(--accent-cyan)" },
+              { label: "Hired", key: "hired", color: "#f59e0b" },
+              { label: "Executing", key: "executing", color: "#a78bfa" },
+              { label: "Delivered", key: "delivered", color: "#34d399" },
+              { label: "Paid", key: "paid", color: "#10b981" },
+            ].map((stage) => {
+              const count = pipelineStats?.by_status?.[stage.key] ?? 0;
+              const total = pipelineStats?.total_prospects || 1;
+              const pct = Math.min(100, Math.round((count / total) * 100));
+              return (
+                <div key={stage.key}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, fontFamily: "var(--font-mono)", marginBottom: 3 }}>
+                    <span style={{ color: stage.color }}>{stage.label}</span>
+                    <span style={{ color: "var(--text-muted)" }}>{count}</span>
+                  </div>
+                  <div style={{ height: 4, background: "rgba(30,45,74,0.5)", borderRadius: 2 }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: stage.color, borderRadius: 2, transition: "width 0.3s" }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 12, padding: "6px 10px", borderRadius: 4, background: "rgba(16,185,129,0.05)", border: "1px solid rgba(16,185,129,0.15)", fontFamily: "var(--font-mono)", fontSize: 10, color: "#34d399", display: "flex", justifyContent: "space-between" }}>
+            <span>REVENUE: ${pipelineStats?.revenue ?? 0}</span>
+            <span>PROFIT: ${pipelineStats?.estimated_profit ?? 0}</span>
           </div>
         </Panel>
       </div>
