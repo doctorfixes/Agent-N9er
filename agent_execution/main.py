@@ -428,6 +428,7 @@ async def generate_proposal(req: ProposalRequest):
                 "- Do NOT include pricing — that's handled separately.\n"
                 "- Do NOT use generic phrases like 'I have extensive experience' or 'high-quality results'.\n"
                 "- DO reference specific details from the job description.\n"
+                "- Use only ASCII characters — no em dashes, curly quotes, or special Unicode.\n"
                 f"- PLATFORM: {platform_tip}"
             ),
         },
