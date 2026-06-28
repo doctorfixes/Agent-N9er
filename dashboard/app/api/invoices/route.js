@@ -8,10 +8,14 @@ function svcHeaders() {
 }
 
 export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status");
-  const qs = status ? `?status=${status}` : "";
-  const resp = await fetch(`${BILLING_URL}/invoices${qs}`, { headers: svcHeaders() });
-  let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
-  return Response.json(data);
+  try {
+    const { searchParams } = new URL(request.url);
+    const status = searchParams.get("status");
+    const qs = status ? `?status=${status}` : "";
+    const resp = await fetch(`${BILLING_URL}/invoices${qs}`, { headers: svcHeaders() });
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
+    return Response.json(data);
+  } catch (e) {
+    return Response.json({ error: e.message || "Service unavailable" }, { status: 502 });
+  }
 }
