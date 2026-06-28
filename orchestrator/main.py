@@ -39,6 +39,22 @@ BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
 FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "true").lower() == "true"
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+async def telegram_notify(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
+            )
+    except Exception as e:
+        logger.warning("Telegram notification failed: %s", e)
+
 DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
@@ -170,6 +186,12 @@ async def _run_scan_cycle():
     _scan_state["last_results"] = results
 
     logger.info("Scan cycle complete: %d platforms, %d new prospects", len(SCAN_PLATFORMS), total_new)
+    if total_new > 0:
+        await telegram_notify(
+            f"*Scan Complete*\n"
+            f"New prospects: {total_new}\n"
+            f"Platforms: {', '.join(SCAN_PLATFORMS)}"
+        )
     return results
 
 
@@ -497,6 +519,27 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                     # 2b. Auto-bid on Freelancer prospects
                     if prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and quoted > 0:
                         try:
+                            proposal_text = ""
+                            try:
+                                prop_resp = await client.post(
+                                    f"{EXECUTION_URL}/proposal",
+                                    json={
+                                        "title": prospect.get("title", ""),
+                                        "description": prospect.get("description", ""),
+                                        "skills": prospect.get("skills", ""),
+                                        "platform": "freelancer",
+                                        "budget_max": prospect.get("budget_max", 0),
+                                    },
+                                    headers=svc,
+                                    timeout=30.0,
+                                )
+                                if prop_resp.status_code == 200:
+                                    prop_data = prop_resp.json()
+                                    if prop_data.get("ok"):
+                                        proposal_text = prop_data.get("proposal", "")
+                            except Exception as pe:
+                                logger.warning("Proposal generation failed for %s: %s", pid[:8], pe)
+
                             bid_resp = await client.post(
                                 f"{PROSPECTOR_URL}/freelancer/bid",
                                 json={
@@ -504,7 +547,7 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                     "bid_amount": quoted,
                                     "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
                                     "milestone_percentage": 100.0,
-                                    "description": "",
+                                    "description": proposal_text,
                                 },
                                 headers=svc,
                             )
@@ -513,6 +556,13 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 prospect_result["freelancer_bid_id"] = bid_data.get("bid_id")
                                 prospect_result["status"] = "applied"
                                 logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], quoted)
+                                await telegram_notify(
+                                    f"*Bid Placed*\n"
+                                    f"Project: {prospect.get('title', 'Unknown')}\n"
+                                    f"Amount: ${quoted:.2f}\n"
+                                    f"Bid ID: {bid_data.get('bid_id')}\n"
+                                    f"URL: {prospect.get('url', '')}"
+                                )
                             else:
                                 logger.warning("Freelancer auto-bid failed for %s: %s", pid[:8], bid_resp.text)
                         except httpx.RequestError as e:
