@@ -1520,7 +1520,7 @@ async def check_freelancer_awarded():
                 f"{FREELANCER_API_BASE}/projects/0.1/bids/",
                 params={
                     "bidders[]": FREELANCER_USER_ID,
-                    "bid_statuses[]": "awarded",
+                    "limit": 50,
                 },
                 headers=_freelancer_headers(),
             )
@@ -1528,6 +1528,11 @@ async def check_freelancer_awarded():
             bids = resp.json().get("result", {}).get("bids", [])
 
             for bid in bids:
+                award_status = bid.get("award_status")
+                frontend_status = bid.get("frontend_bid_status", "")
+                if award_status not in ("awarded", "accepted") and frontend_status != "awarded":
+                    continue
+
                 project_id = str(bid.get("project_id", ""))
                 prospect = None
                 async with aiosqlite.connect(DB_PATH) as db:
