@@ -46,7 +46,7 @@ class TestEstimateCost:
         assert est.model == MODEL_TIERS["standard"]["model"]
         assert est.estimated_cost_usd > 0
         assert est.quoted_price_usd > est.estimated_cost_usd
-        assert est.markup_multiplier == 3.0
+        assert est.markup_multiplier == 8.0
 
     def test_budget_tier_cheaper(self):
         budget = estimate_cost("Fix a typo", tier="budget", expected_output_tokens=500)
@@ -60,7 +60,7 @@ class TestEstimateCost:
 
     def test_markup_applied(self):
         est = estimate_cost("Test task", tier="standard")
-        assert abs(est.quoted_price_usd - est.estimated_cost_usd * 3.0) < 0.01
+        assert abs(est.quoted_price_usd - est.estimated_cost_usd * 8.0) < 0.01
 
     def test_deepseek_tier(self):
         est = estimate_cost("Quick task", tier="deepseek")

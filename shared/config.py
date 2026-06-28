@@ -15,7 +15,7 @@ _PROFILES = {
         "CORS_ORIGINS": "http://localhost:3000",
         "LOG_LEVEL": "DEBUG",
         "DB_BACKEND": "sqlite",
-        "MARKUP_MULTIPLIER": 3.0,
+        "MARKUP_MULTIPLIER": 8.0,
         "MINIMUM_QUOTE_USD": 5.0,
     },
     "staging": {
@@ -30,7 +30,7 @@ _PROFILES = {
         "CORS_ORIGINS": "https://staging.agentn9er.com",
         "LOG_LEVEL": "INFO",
         "DB_BACKEND": "postgres",
-        "MARKUP_MULTIPLIER": 3.0,
+        "MARKUP_MULTIPLIER": 8.0,
         "MINIMUM_QUOTE_USD": 5.0,
     },
     "production": {
@@ -45,7 +45,7 @@ _PROFILES = {
         "CORS_ORIGINS": "https://agentn9er.com",
         "LOG_LEVEL": "WARNING",
         "DB_BACKEND": "postgres",
-        "MARKUP_MULTIPLIER": 3.0,
+        "MARKUP_MULTIPLIER": 8.0,
         "MINIMUM_QUOTE_USD": 5.0,
     },
 }

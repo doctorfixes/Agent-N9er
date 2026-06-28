@@ -15,7 +15,7 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "3.0"))
+MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "8.0"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 PROVIDER_ORDER = ["openrouter", "anthropic", "openai", "azure", "gemini"]

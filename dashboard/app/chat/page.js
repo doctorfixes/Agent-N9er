@@ -78,11 +78,17 @@ export default function ChatPage() {
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         }]);
       } else {
+        if (data.suggested_price) {
+          setQuoteAmount(String(data.suggested_price));
+        }
+        const pricingMeta = data.pricing
+          ? ` // ${data.pricing.complexity} complexity // ${data.pricing.multiplier}x markup`
+          : "";
         setMessages((prev) => [...prev, {
           role: "assistant",
           content: data.reply,
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          meta: `${data.mode} // ${data.model || "sim"} // $${data.cost_usd?.toFixed(4) || "0"} // ${data.tokens || 0} tokens`,
+          meta: `${data.mode} // ${data.model || "sim"} // $${data.cost_usd?.toFixed(4) || "0"} // ${data.tokens || 0} tokens${pricingMeta}`,
         }]);
       }
     } catch (e) {

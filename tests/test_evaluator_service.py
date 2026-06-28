@@ -34,7 +34,7 @@ class TestEvaluate:
         assert data["complexity"] == "simple"
         assert data["quoted_price_usd"] > 0
         assert data["estimated_profit_usd"] > 0
-        assert data["markup_multiplier"] == 3.0
+        assert data["markup_multiplier"] == 8.0
 
     async def test_complex_task_viable(self, client):
         resp = await client.post("/evaluate", json={
@@ -96,7 +96,7 @@ class TestPricing:
     async def test_pricing_endpoint(self, client):
         resp = await client.get("/pricing")
         data = resp.json()
-        assert data["markup_multiplier"] == 3.0
+        assert data["markup_multiplier"] == 8.0
         assert data["minimum_quote_usd"] == 5.0
         assert "standard" in data["model_tiers"]
         assert "budget" in data["model_tiers"]
