@@ -80,6 +80,7 @@ function ExecutionModal({ prospect, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [reexecuting, setReexecuting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -106,7 +107,30 @@ function ExecutionModal({ prospect, onClose }) {
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent-cyan)", fontWeight: 600 }}>
             Execution Details
           </div>
-          <button className="cmd-btn sm" onClick={onClose}>Close</button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="cmd-btn sm primary" disabled={reexecuting} onClick={async () => {
+              setReexecuting(true);
+              setError(null);
+              try {
+                const resp = await fetch("/api/execution/trigger", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ prospect_id: prospect.id }),
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                  setData(result.result || null);
+                  setError(null);
+                } else {
+                  setError(`Execution failed: ${result.status || "unknown"}`);
+                }
+              } catch (e) {
+                setError(e.message);
+              }
+              setReexecuting(false);
+            }}>{reexecuting ? "Executing..." : (error || !data) ? "Execute" : "Re-execute"}</button>
+            <button className="cmd-btn sm" onClick={onClose}>Close</button>
+          </div>
         </div>
 
         <div style={{ padding: "8px 12px", marginBottom: 12, background: "var(--bg-input)", borderRadius: 4, border: "1px solid var(--border)" }}>

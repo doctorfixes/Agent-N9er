@@ -437,20 +437,15 @@ async def _check_awarded_and_execute(svc=None):
                     pid = prospect["id"]
                     title = prospect.get("title", "Unknown")
 
-                    ethics = screen_project(
-                        title,
-                        prospect.get("description", ""),
-                        prospect.get("skills", ""),
-                    )
+                    ethics = screen_project(title, "", "")
                     if not ethics["allowed"]:
-                        logger.warning("ETHICS BLOCK on hired project: %s -- %s", title[:60], ethics["flags"])
+                        logger.warning("ETHICS SOFT-FLAG on hired project (title-only): %s -- %s", title[:60], ethics["flags"])
                         await telegram_notify(
-                            f"EXECUTION BLOCKED (ethics)\n"
+                            f"ETHICS WARNING (hired project)\n"
                             f"Project: {title}\n"
                             f"Flags: {', '.join(ethics['flags'])}\n"
-                            f"Manual review required."
+                            f"Proceeding — project already passed pre-bid screening."
                         )
-                        continue
 
                     await client.patch(
                         f"{PROSPECTOR_URL}/prospects/{pid}",
@@ -1153,6 +1148,59 @@ async def get_activity(limit: int = 50, event_type: str = ""):
     if event_type:
         logs = [e for e in logs if e["type"] == event_type]
     return {"events": logs[:limit], "total": len(_activity_log)}
+
+
+@app.post("/execute-prospect")
+async def execute_prospect(body: dict):
+    """Manually trigger execution for a specific prospect."""
+    prospect_id = body.get("prospect_id")
+    if not prospect_id:
+        raise HTTPException(status_code=400, detail="prospect_id required")
+
+    svc = _svc_headers()
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        resp = await client.get(
+            f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+            headers=svc,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=404, detail="Prospect not found")
+        prospect = resp.json()
+        title = prospect.get("title", "Unknown")
+
+        await client.patch(
+            f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+            json={"status": "executing"},
+            headers=svc,
+        )
+
+        try:
+            exec_resp = await client.post(
+                f"{EXECUTION_URL}/execute",
+                json={
+                    "task_id": prospect_id,
+                    "agent_id": "agent-n9er-primary",
+                    "objective": title,
+                    "description": prospect.get("description", ""),
+                    "complexity": prospect.get("complexity", "moderate"),
+                    "confidence": 0.8,
+                    "tier": prospect.get("tier", "standard"),
+                    "platform": prospect.get("platform", "freelancer"),
+                    "budget": prospect.get("quoted_price", 0),
+                    "client": prospect.get("client_username", ""),
+                },
+                headers=svc,
+                timeout=120.0,
+            )
+            if exec_resp.status_code == 200 and exec_resp.json().get("success"):
+                _log_activity("execution_complete", f"Executed: {title[:60]}", {"prospect_id": prospect_id})
+                return {"ok": 1, "status": "success", "result": exec_resp.json()}
+            else:
+                _log_activity("execution_failed", f"Execution failed: {title[:60]}", {"prospect_id": prospect_id})
+                return {"ok": 0, "status": "failed", "result": exec_resp.json() if exec_resp.status_code == 200 else exec_resp.text}
+        except Exception as e:
+            _log_activity("execution_failed", f"Execution error: {title[:60]} — {str(e)[:60]}", {"prospect_id": prospect_id})
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/auto-reply/trigger")

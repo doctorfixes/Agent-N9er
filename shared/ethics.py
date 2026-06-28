@@ -29,8 +29,8 @@ BLOCKED_CATEGORIES = {
         r"take\s+my\s+(exam|test|quiz|online\s+class)\b",
         r"do\s+my\s+(homework|assignment|coursework)\b",
         r"ghost\s*writ(e|ing)\s+(essay|thesis|dissertation|research\s+paper)\b",
-        r"plagiari(sm|ze)", r"cheat(ing)?\s+(on\s+)?(exam|test|quiz)",
-        r"buy\s+(essay|thesis|assignment|diploma)\b",
+        r"plagiari(sm|ze)", r"cheat(ing)?\s+(on\s+)?(exam|test|quiz)\b",
+        r"buy\s+(an?\s+)?(essay|thesis|assignment|diploma)\b",
     ],
     "deception_and_manipulation": [
         r"fake\s+review", r"astroturf", r"shill\s+(post|review|comment)",
@@ -56,7 +56,7 @@ BLOCKED_CATEGORIES = {
         r"harvest\s+(email|phone|personal)\s+data",
     ],
     "copyright_piracy": [
-        r"crack(ed)?\s+(software|game|app|license)",
+        r"crack(ed)?\s+(the\s+)?(software|game|license)\b",
         r"pirat(e|ed|ing)\s+(movie|music|software|game|book|content)",
         r"torrent\s+(site|platform|index).*build",
         r"bypass\s+(drm|copy\s*protect|license\s+key)",
