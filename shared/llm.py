@@ -66,7 +66,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 8192,
         "label": "High-volume, cost-sensitive tasks",
         "models": {
-            "openrouter": "deepseek/deepseek-chat-v3-0324",
+            "openrouter": "deepseek/deepseek-chat",
             "anthropic": "claude-3-5-haiku-latest",
             "openai": "gpt-4o-mini",
             "azure": os.getenv("AZURE_OPENAI_BUDGET_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")),
