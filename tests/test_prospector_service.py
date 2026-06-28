@@ -322,3 +322,127 @@ class TestPlatforms:
             assert "status" in p
             assert "type" in p
             assert "description" in p
+
+
+class TestFreelancerIntegration:
+    async def test_freelancer_status_unconfigured(self, client):
+        original = prospector.FREELANCER_OAUTH_TOKEN
+        prospector.FREELANCER_OAUTH_TOKEN = ""
+        try:
+            resp = await client.get("/freelancer/status")
+            data = resp.json()
+            assert data["configured"] is False
+        finally:
+            prospector.FREELANCER_OAUTH_TOKEN = original
+
+    async def test_freelancer_bid_requires_token(self, client):
+        original = prospector.FREELANCER_OAUTH_TOKEN
+        prospector.FREELANCER_OAUTH_TOKEN = ""
+        try:
+            await prospector._save_prospect({
+                "id": "fb1", "platform": "freelancer", "platform_job_id": "12345",
+                "title": "Test Project", "description": "Build something",
+                "budget_min": 100, "budget_max": 500, "status": "approved",
+            })
+            resp = await client.post("/freelancer/bid", json={
+                "prospect_id": "fb1", "bid_amount": 300,
+            })
+            assert resp.status_code == 503
+        finally:
+            prospector.FREELANCER_OAUTH_TOKEN = original
+
+    async def test_freelancer_bid_wrong_platform(self, client):
+        original = prospector.FREELANCER_OAUTH_TOKEN
+        prospector.FREELANCER_OAUTH_TOKEN = "test-token"
+        try:
+            await prospector._save_prospect({
+                "id": "fb2", "platform": "upwork", "platform_job_id": "u123",
+                "title": "Upwork Job", "description": "Not freelancer",
+                "budget_min": 0, "budget_max": 0, "status": "approved",
+            })
+            resp = await client.post("/freelancer/bid", json={
+                "prospect_id": "fb2", "bid_amount": 100,
+            })
+            assert resp.status_code == 422
+        finally:
+            prospector.FREELANCER_OAUTH_TOKEN = original
+
+    async def test_freelancer_bid_success(self, client):
+        original_token = prospector.FREELANCER_OAUTH_TOKEN
+        original_user = prospector.FREELANCER_USER_ID
+        prospector.FREELANCER_OAUTH_TOKEN = "test-token"
+        prospector.FREELANCER_USER_ID = "99999"
+        try:
+            await prospector._save_prospect({
+                "id": "fb3", "platform": "freelancer", "platform_job_id": "67890",
+                "title": "Build API", "description": "REST API needed",
+                "budget_min": 200, "budget_max": 800, "status": "approved",
+            })
+
+            mock_resp = MagicMock()
+            mock_resp.json = MagicMock(return_value={"result": {"id": 11111}})
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.status_code = 200
+
+            mock_http = AsyncMock()
+            mock_http.post = AsyncMock(return_value=mock_resp)
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/freelancer/bid", json={
+                    "prospect_id": "fb3",
+                    "bid_amount": 500,
+                    "period": 14,
+                    "description": "I can build this API.",
+                })
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["bid_id"] == 11111
+            assert data["amount"] == 500
+
+            prospect = (await client.get("/prospects/fb3")).json()
+            assert prospect["status"] == "applied"
+            assert prospect["quoted_price"] == 500
+        finally:
+            prospector.FREELANCER_OAUTH_TOKEN = original_token
+            prospector.FREELANCER_USER_ID = original_user
+
+    async def test_freelancer_scan_authenticated(self, client):
+        original = prospector.FREELANCER_OAUTH_TOKEN
+        prospector.FREELANCER_OAUTH_TOKEN = "test-token"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json = MagicMock(return_value={
+                "result": {"projects": [{
+                    "id": 99999,
+                    "title": "Build Mobile App",
+                    "description": "Need a Flutter app",
+                    "preview_description": "Need a Flutter app",
+                    "budget": {"minimum": 500, "maximum": 2000},
+                    "seo_url": "build-mobile-app",
+                    "jobs": [{"name": "Flutter"}, {"name": "Dart"}],
+                }]}
+            })
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = MagicMock()
+
+            mock_http = AsyncMock()
+            mock_http.get = AsyncMock(return_value=mock_resp)
+            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+            mock_http.__aexit__ = AsyncMock(return_value=False)
+
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/scan", json={"platform": "freelancer"})
+
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["discovered"] == 1
+
+            call_args = mock_http.get.call_args
+            headers = call_args.kwargs.get("headers", {})
+            assert headers.get("Freelancer-OAuth-V1") == "test-token"
+        finally:
+            prospector.FREELANCER_OAUTH_TOKEN = original

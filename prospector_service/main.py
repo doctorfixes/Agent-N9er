@@ -45,6 +45,10 @@ UPWORK_SEARCH_CATEGORIES = os.getenv(
 GITHUB_API = "https://api.github.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
+FREELANCER_API_BASE = "https://www.freelancer.com/api"
+FREELANCER_OAUTH_TOKEN = os.getenv("FREELANCER_OAUTH_TOKEN", "")
+FREELANCER_USER_ID = os.getenv("FREELANCER_USER_ID", "")
+
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
     "hired", "executing", "delivered", "paid", "rated", "rejected",
@@ -183,6 +187,14 @@ class ScanRequest(BaseModel):
 class ProspectUpdate(BaseModel):
     status: str
     notes: str = ""
+
+
+class FreelancerBidRequest(BaseModel):
+    prospect_id: str
+    bid_amount: float = Field(gt=0)
+    period: int = Field(default=7, ge=1, description="Delivery period in days")
+    milestone_percentage: float = Field(default=100.0, ge=0, le=100)
+    description: str = Field(default="", description="Proposal text; auto-generated if empty")
 
 
 def _svc_headers():
@@ -700,26 +712,48 @@ async def _scan_onlydust(query: str, category: str, max_results: int) -> list[di
     return prospects
 
 
+def _freelancer_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    if FREELANCER_OAUTH_TOKEN:
+        headers["Freelancer-OAuth-V1"] = FREELANCER_OAUTH_TOKEN
+    return headers
+
+
 @scanner("freelancer")
 async def _scan_freelancer(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            params = {"compact": "true", "limit": max_results, "sort_field": "time_updated",
-                      "project_types[]": "fixed"}
+            params = {
+                "compact": "true",
+                "limit": max_results,
+                "sort_field": "time_updated",
+                "project_types[]": "fixed",
+                "full_description": "true",
+                "job_details": "true",
+                "user_details": "true",
+            }
             if query:
                 params["query"] = query
-            resp = await client.get("https://www.freelancer.com/api/projects/0.1/projects/active/", params=params)
+            if category:
+                params["jobs[]"] = category
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/projects/active/",
+                params=params,
+                headers=_freelancer_headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
 
             for proj in data.get("result", {}).get("projects", [])[:max_results]:
                 budget = proj.get("budget", {}) or {}
+                owner = proj.get("owner", {}) or {}
+                description = proj.get("description", proj.get("preview_description", "")) or ""
                 prospects.append(_make_prospect(
                     platform="freelancer",
                     job_id=str(proj.get("id", uuid.uuid4())),
                     title=proj.get("title", ""),
-                    description=(proj.get("preview_description", "") or "")[:2000],
+                    description=description[:2000],
                     budget_min=float(budget.get("minimum", 0) or 0),
                     budget_max=float(budget.get("maximum", 0) or 0),
                     url=f"https://www.freelancer.com/projects/{proj.get('seo_url', '')}",
@@ -1265,6 +1299,166 @@ async def _update_status(prospect_id: str, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE prospects SET status = ? WHERE id = ?", (status, prospect_id))
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Freelancer.com bid submission
+# ---------------------------------------------------------------------------
+
+async def _generate_proposal(title: str, description: str, skills: str, bid_amount: float, period: int) -> str:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from shared.llm import complete, has_available_provider
+
+    if not has_available_provider():
+        return (
+            f"I'd like to work on \"{title}\". "
+            f"I can deliver this within {period} days for ${bid_amount:.2f}. "
+            "I have relevant experience and am ready to start immediately."
+        )
+
+    prompt = f"""Write a concise, professional freelancer bid proposal for this project.
+Keep it under 200 words. Be specific to the project requirements. Do not use generic filler.
+
+Project Title: {title}
+Description: {description}
+Required Skills: {skills}
+Bid Amount: ${bid_amount:.2f}
+Delivery: {period} days
+
+Write ONLY the proposal text, no headers or meta-commentary."""
+
+    resp = await complete(
+        messages=[{"role": "user", "content": prompt}],
+        tier="budget",
+        temperature=0.5,
+        max_tokens=512,
+    )
+    return resp.content.strip()
+
+
+@app.post("/freelancer/bid")
+async def submit_freelancer_bid(req: FreelancerBidRequest):
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    prospect = await _get_prospect(req.prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=422, detail="Prospect is not from Freelancer.com")
+
+    project_id = prospect["platform_job_id"]
+    if not project_id:
+        raise HTTPException(status_code=422, detail="Missing Freelancer project ID")
+
+    proposal_text = req.description
+    if not proposal_text:
+        proposal_text = await _generate_proposal(
+            title=prospect["title"],
+            description=prospect.get("description", ""),
+            skills=prospect.get("skills", ""),
+            bid_amount=req.bid_amount,
+            period=req.period,
+        )
+
+    bid_payload = {
+        "project_id": int(project_id),
+        "bidder_id": int(FREELANCER_USER_ID) if FREELANCER_USER_ID else None,
+        "amount": req.bid_amount,
+        "period": req.period,
+        "milestone_percentage": req.milestone_percentage,
+        "description": proposal_text,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                headers=_freelancer_headers(),
+                json=bid_payload,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.json() if e.response.headers.get("content-type", "").startswith("application/json") else {}
+        error_msg = error_body.get("message", str(e))
+        logger.error("Freelancer bid failed for project %s: %s", project_id, error_msg)
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+    await _update_status(req.prospect_id, "applied")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE prospects SET quoted_price = ?, applied_at = ? WHERE id = ?",
+            (req.bid_amount, datetime.utcnow().isoformat(), req.prospect_id),
+        )
+        await db.commit()
+
+    bid_id = result.get("result", {}).get("id")
+    logger.info("Freelancer bid submitted: project=%s bid_id=%s amount=$%.2f", project_id, bid_id, req.bid_amount)
+    return {
+        "ok": 1,
+        "bid_id": bid_id,
+        "project_id": project_id,
+        "amount": req.bid_amount,
+        "period": req.period,
+        "proposal_preview": proposal_text[:200],
+    }
+
+
+@app.post("/freelancer/generate-proposal")
+async def generate_proposal_endpoint(prospect_id: str, bid_amount: float = 0, period: int = 7):
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+
+    amount = bid_amount or prospect.get("budget_max", 0) or prospect.get("budget_min", 50)
+    proposal = await _generate_proposal(
+        title=prospect["title"],
+        description=prospect.get("description", ""),
+        skills=prospect.get("skills", ""),
+        bid_amount=amount,
+        period=period,
+    )
+    return {"ok": 1, "proposal": proposal, "bid_amount": amount, "period": period}
+
+
+@app.get("/freelancer/status")
+async def freelancer_status():
+    has_token = bool(FREELANCER_OAUTH_TOKEN)
+    has_user_id = bool(FREELANCER_USER_ID)
+    token_valid = False
+
+    if has_token:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/users/0.1/self/",
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+                user_data = resp.json().get("result", {})
+                token_valid = True
+                return {
+                    "ok": 1,
+                    "configured": True,
+                    "token_valid": True,
+                    "user_id": user_data.get("id"),
+                    "username": user_data.get("username"),
+                    "display_name": user_data.get("display_name"),
+                }
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning("Freelancer token validation failed: %s", e)
+
+    return {
+        "ok": 0 if not has_token else 1,
+        "configured": has_token,
+        "token_valid": token_valid,
+        "has_user_id": has_user_id,
+        "message": "Set FREELANCER_OAUTH_TOKEN and FREELANCER_USER_ID in .env" if not has_token else "Token validation failed",
+    }
 
 
 if __name__ == "__main__":
