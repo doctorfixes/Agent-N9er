@@ -244,6 +244,17 @@ async def _init_db():
             CREATE INDEX IF NOT EXISTS idx_prospect_platform
             ON prospects (platform, created_at DESC)
         """)
+        for col, coltype in [
+            ("thread_id", "TEXT"),
+            ("client_username", "TEXT DEFAULT ''"),
+            ("complexity", "TEXT DEFAULT 'moderate'"),
+            ("tier", "TEXT DEFAULT 'standard'"),
+            ("bid_id", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE prospects ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -1182,9 +1193,10 @@ async def evaluate_prospect(prospect_id: str):
         new_status = "approved" if evaluation.get("viable") else "rejected"
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE prospects SET status = ?, evaluation_id = ?, quoted_price = ?, estimated_cost = ? WHERE id = ?",
+                "UPDATE prospects SET status = ?, evaluation_id = ?, quoted_price = ?, estimated_cost = ?, complexity = ?, tier = ? WHERE id = ?",
                 (new_status, evaluation["evaluation_id"], evaluation.get("quoted_price_usd", 0),
-                 evaluation.get("estimated_cost_usd", 0), prospect_id),
+                 evaluation.get("estimated_cost_usd", 0), evaluation.get("complexity", "moderate"),
+                 evaluation.get("recommended_tier", "standard"), prospect_id),
             )
             await db.commit()
 
@@ -1402,8 +1414,9 @@ async def submit_freelancer_bid(req: FreelancerBidRequest):
     await _update_status(req.prospect_id, "applied")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE prospects SET quoted_price = ?, applied_at = ? WHERE id = ?",
-            (req.bid_amount, datetime.now(timezone.utc).isoformat(), req.prospect_id),
+            "UPDATE prospects SET quoted_price = ?, applied_at = ?, bid_id = ? WHERE id = ?",
+            (req.bid_amount, datetime.now(timezone.utc).isoformat(),
+             result.get("result", {}).get("id"), req.prospect_id),
         )
         await db.commit()
 
@@ -1547,10 +1560,43 @@ async def check_freelancer_awarded():
 
                 if prospect and prospect["status"] == "applied":
                     await _update_status(prospect["id"], "hired")
+
+                    thread_id = None
+                    client_username = ""
+                    try:
+                        owner_id = str(bid.get("project_owner_id", ""))
+                        if owner_id:
+                            user_resp = await client.get(
+                                f"{FREELANCER_API_BASE}/users/0.1/users/{owner_id}/",
+                                headers=_freelancer_headers(),
+                            )
+                            if user_resp.status_code == 200:
+                                u = user_resp.json().get("result", {})
+                                client_username = u.get("username") or u.get("public_name") or ""
+
+                        threads_resp = await client.get(
+                            f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                            params={"projects[]": project_id, "limit": 1},
+                            headers=_freelancer_headers(),
+                        )
+                        if threads_resp.status_code == 200:
+                            t_result = threads_resp.json().get("result", {})
+                            t_threads = t_result.get("threads", [])
+                            if not t_threads and isinstance(t_result, dict):
+                                for v in t_result.values():
+                                    if isinstance(v, list) and v:
+                                        t_threads = v
+                                        break
+                            if t_threads:
+                                t = t_threads[0]
+                                thread_id = t.get("id") or (t.get("thread", {}) or {}).get("id")
+                    except Exception as te:
+                        logger.warning("Failed to fetch thread/client for project %s: %s", project_id, te)
+
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute(
-                            "UPDATE prospects SET hired_at = ? WHERE id = ?",
-                            (datetime.now(timezone.utc).isoformat(), prospect["id"]),
+                            "UPDATE prospects SET hired_at = ?, thread_id = ?, client_username = ? WHERE id = ?",
+                            (datetime.now(timezone.utc).isoformat(), thread_id, client_username, prospect["id"]),
                         )
                         await db.commit()
                     awarded.append({
@@ -1558,6 +1604,7 @@ async def check_freelancer_awarded():
                         "project_id": project_id,
                         "title": prospect["title"],
                         "bid_amount": bid.get("amount", 0),
+                        "client_username": client_username,
                     })
                     logger.info("Freelancer bid AWARDED: project=%s title=%s", project_id, prospect["title"])
 
@@ -1774,6 +1821,12 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                         row = await cursor.fetchone()
                         if row:
                             prospect = dict(row)
+                            if thread_id and not prospect.get("thread_id"):
+                                await db.execute(
+                                    "UPDATE prospects SET thread_id = ?, client_username = ? WHERE id = ?",
+                                    (str(thread_id), sender_name, prospect["id"]),
+                                )
+                                await db.commit()
 
                 last_msg_raw = thread_wrapper.get("last_message") or inner.get("message") or ""
                 if isinstance(last_msg_raw, dict):

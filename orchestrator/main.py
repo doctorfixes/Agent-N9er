@@ -728,7 +728,7 @@ async def _check_freelancer_messages(svc=None):
 def _detect_quote_request(message: str, status: str) -> bool:
     """Detect if a client message is asking for a quote or price."""
     import re
-    if status in ("awarded", "hired", "delivering", "active"):
+    if status in ("awarded", "hired", "executing", "delivered", "paid", "active"):
         return False
     quote_patterns = [
         r"how much", r"what.*cost", r"your (price|rate|quote|fee)",
@@ -864,12 +864,12 @@ async def _auto_reply_to_message(
                 for m in recent
             )
 
-        is_awarded = status in ("awarded", "hired", "delivering", "active")
+        is_awarded = status in ("awarded", "hired", "executing", "delivered", "active")
 
         system_prompt = (
             "You are a professional freelance developer responding to a client on Freelancer.com. "
             "Be concise, professional, and helpful. Keep replies under 100 words. "
-            "Never reveal you are an AI. Respond as a skilled developer. "
+            "Never reveal you are an AI. Respond as a skilled developer named Randy. "
             "If the client is asking about project details, provide a clear and confident response. "
             "If they are asking about timelines, be realistic but competitive. "
             "If they want to discuss scope or requirements, engage constructively."
@@ -890,7 +890,17 @@ async def _auto_reply_to_message(
             user_prompt += f"Recent conversation:\n{conversation_context}\n\n"
         user_prompt += f"Latest message from client: {client_message}\n\nYour reply:"
 
-        if is_awarded:
+        if status in ("executing",):
+            user_prompt += (
+                "\n\nYou are actively working on this project. "
+                "Give a progress update and address their question. Be confident."
+            )
+        elif status in ("delivered",):
+            user_prompt += (
+                "\n\nYou have delivered the work for this project. "
+                "Address any questions about the deliverable or revisions needed."
+            )
+        elif is_awarded:
             user_prompt += (
                 "\n\nThis project has been awarded to you. "
                 "Confirm you are working on it and address their question directly."

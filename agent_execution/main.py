@@ -33,6 +33,9 @@ class ExecuteRequest(BaseModel):
     description: str = ""
     complexity: str = "moderate"
     tier: str = ""
+    platform: str = "freelancer"
+    budget: float = 0
+    client: str = ""
 
 
 class ProposalRequest(BaseModel):
@@ -183,8 +186,14 @@ async def _execute_live(request: ExecuteRequest) -> dict:
         },
         {
             "role": "user",
-            "content": f"Task: {request.objective}\n\nDetails: {request.description}" if request.description
-            else f"Task: {request.objective}",
+            "content": (
+                f"Task: {request.objective}\n\n"
+                + (f"Details: {request.description}\n\n" if request.description else "")
+                + (f"Platform: {request.platform}\n" if request.platform else "")
+                + (f"Client: {request.client}\n" if request.client else "")
+                + (f"Budget: ${request.budget:.2f}\n" if request.budget else "")
+                + f"Complexity: {request.complexity}"
+            ),
         },
     ]
 
