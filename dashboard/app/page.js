@@ -42,9 +42,9 @@ export default function MissionControl() {
   const [dispatching, setDispatching] = useState(false);
   const [ruleObjective, setRuleObjective] = useState("");
   const [ruleCategory, setRuleCategory] = useState("uncategorized");
-  const [activity, setActivity] = useState([]);
-  const activityRef = useRef(activity);
-  activityRef.current = activity;
+  const [localActivity, setLocalActivity] = useState([]);
+  const activityRef = useRef(localActivity);
+  activityRef.current = localActivity;
 
   const { data: health } = useSWR("/api/health", fetcher, { refreshInterval: 15000 });
   const { data: tasks } = useSWR("/api/tasks", fetcher, { refreshInterval: 5000 });
@@ -56,11 +56,24 @@ export default function MissionControl() {
   const { data: messages } = useSWR("/api/messages?limit=5", fetcher, { refreshInterval: 15000 });
   const { data: autoReply } = useSWR("/api/auto-reply", fetcher, { refreshInterval: 15000 });
   const { data: revenue } = useSWR("/api/revenue", fetcher, { refreshInterval: 30000 });
+  const { data: activityFeed } = useSWR("/api/activity?limit=30", fetcher, { refreshInterval: 10000 });
 
   const addActivity = (msg, type = "info") => {
     const entry = { time: new Date().toLocaleTimeString("en-US", { hour12: false }), msg, type };
     const updated = [entry, ...activityRef.current].slice(0, 30);
-    setActivity(updated);
+    setLocalActivity(updated);
+  };
+
+  const EVENT_ICONS = {
+    bid_placed: "→", bid_accepted: "✓", auto_reply: "↩", quote_sent: "$",
+    delivered: "📦", payment: "💰", message_received: "✉", execution_failed: "✗",
+    delivery_failed: "✗",
+  };
+  const EVENT_COLORS = {
+    bid_placed: "var(--accent-cyan)", bid_accepted: "#f59e0b", auto_reply: "var(--accent-green)",
+    quote_sent: "#a78bfa", delivered: "#34d399", payment: "#10b981",
+    message_received: "var(--text-secondary)", execution_failed: "var(--accent-red)",
+    delivery_failed: "var(--accent-red)",
   };
 
   const taskList = Array.isArray(tasks) ? tasks : [];
@@ -228,18 +241,23 @@ export default function MissionControl() {
           )}
         </Panel>
 
-        <Panel title="Activity Log" dot="">
+        <Panel title="Activity Feed" dot="info">
           <div style={{ maxHeight: 280, overflow: "auto" }}>
-            {activity.length > 0 ? activity.map((a, i) => (
-              <div key={i} className="activity-item">
-                <span className="time">{a.time}</span>
-                <span className="msg" style={{
-                  color: a.type === "error" ? "var(--accent-red)" : a.type === "success" ? "var(--accent-green)" : "var(--text-secondary)"
-                }}>{a.msg}</span>
-              </div>
-            )) : (
+            {activityFeed?.events?.length > 0 ? activityFeed.events.map((evt, i) => {
+              const ts = new Date(evt.timestamp);
+              const timeStr = ts.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+              const icon = EVENT_ICONS[evt.type] || "•";
+              const color = EVENT_COLORS[evt.type] || "var(--text-secondary)";
+              return (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "5px 0", borderBottom: "1px solid rgba(30,45,74,0.2)", fontFamily: "var(--font-mono)", fontSize: 11, alignItems: "flex-start" }}>
+                  <span style={{ color: "var(--text-muted)", fontSize: 10, minWidth: 42, flexShrink: 0 }}>{timeStr}</span>
+                  <span style={{ minWidth: 16, textAlign: "center", flexShrink: 0 }}>{icon}</span>
+                  <span style={{ color, flex: 1 }}>{evt.summary}</span>
+                </div>
+              );
+            }) : (
               <div style={{ textAlign: "center", padding: 30, color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                Awaiting system events...
+                No activity yet — events appear as bids, replies, and deliveries happen.
               </div>
             )}
           </div>

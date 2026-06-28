@@ -55,6 +55,21 @@ TELEGRAM_COMMAND_ENABLED = os.getenv("TELEGRAM_COMMAND_ENABLED", "true").lower()
 _reply_tracker: dict[int, list[float]] = {}
 _pending_replies: dict[int, dict] = {}
 _pending_replies_lock = asyncio.Lock()
+
+_activity_log: list[dict] = []
+_ACTIVITY_MAX = 200
+
+
+def _log_activity(event_type: str, summary: str, details: dict | None = None):
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": event_type,
+        "summary": summary,
+        "details": details or {},
+    }
+    _activity_log.insert(0, entry)
+    if len(_activity_log) > _ACTIVITY_MAX:
+        del _activity_log[_ACTIVITY_MAX:]
 _telegram_poll_task: asyncio.Task | None = None
 _last_telegram_update_id = 0
 
@@ -363,6 +378,7 @@ async def _auto_evaluate_and_bid(svc=None):
                     bid_data = bid_resp.json()
                     bids_placed += 1
                     logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], bid_amount)
+                    _log_activity("bid_placed", f"Bid ${bid_amount:.2f} on {prospect.get('title', 'Unknown')[:60]}", {"project": prospect.get("title"), "amount": bid_amount, "bid_id": bid_data.get("bid_id"), "prospect_id": pid})
                     await telegram_notify(
                         f"BID PLACED\n"
                         f"Project: {prospect.get('title', 'Unknown')}\n"
@@ -399,6 +415,7 @@ async def _check_awarded_and_execute(svc=None):
                 awarded = awarded_resp.json().get("awarded", [])
                 for award in awarded:
                     logger.info("BID AWARDED: %s", award.get("title", ""))
+                    _log_activity("bid_accepted", f"Hired for {award.get('title', 'Unknown')[:60]} — ${award.get('bid_amount', 0):.2f}", {"project": award.get("title"), "amount": award.get("bid_amount", 0), "client": award.get("client_username", "")})
                     await telegram_notify(
                         f"BID ACCEPTED!\n"
                         f"Project: {award.get('title', 'Unknown')}\n"
@@ -490,6 +507,7 @@ async def _check_awarded_and_execute(svc=None):
                                     timeout=30.0,
                                 )
                                 if deliver_resp.status_code == 200:
+                                    _log_activity("delivered", f"Delivered: {title[:60]}", {"project": title, "prospect_id": pid})
                                     await telegram_notify(
                                         f"WORK DELIVERED\n"
                                         f"Project: {title}\n"
@@ -498,6 +516,7 @@ async def _check_awarded_and_execute(svc=None):
                                     logger.info("Executed and delivered: %s", title[:60])
                                 else:
                                     logger.error("Delivery API returned %s for %s", deliver_resp.status_code, pid[:8])
+                                    _log_activity("delivery_failed", f"Delivery failed: {title[:60]} — will retry", {"project": title, "prospect_id": pid})
                                     await client.patch(
                                         f"{PROSPECTOR_URL}/prospects/{pid}",
                                         json={"status": "hired"},
@@ -510,6 +529,7 @@ async def _check_awarded_and_execute(svc=None):
                                     )
                             except Exception as de:
                                 logger.warning("Milestone delivery failed for %s: %s", pid[:8], de)
+                                _log_activity("delivery_failed", f"Delivery error: {title[:60]} — {str(de)[:60]}", {"project": title, "prospect_id": pid})
                                 await client.patch(
                                     f"{PROSPECTOR_URL}/prospects/{pid}",
                                     json={"status": "hired"},
@@ -523,6 +543,7 @@ async def _check_awarded_and_execute(svc=None):
                                 )
                         else:
                             logger.warning("Execution failed for %s", pid[:8])
+                            _log_activity("execution_failed", f"Execution failed: {title[:60]}", {"project": title, "prospect_id": pid})
                             await telegram_notify(
                                 f"EXECUTION FAILED\n"
                                 f"Project: {title}\n"
@@ -544,6 +565,7 @@ async def _check_awarded_and_execute(svc=None):
                 for payment in payments:
                     amount = payment.get("amount_paid", 0)
                     title_text = payment.get("title", "Unknown")
+                    _log_activity("payment", f"Payment ${amount:.2f} for {title_text[:60]}", {"project": title_text, "amount": amount, "prospect_id": payment.get("prospect_id", "")})
                     await telegram_notify(
                         f"PAYMENT RECEIVED!\n"
                         f"Project: {title_text}\n"
@@ -674,6 +696,7 @@ async def _check_freelancer_messages(svc=None):
                     f"Message: {preview}"
                 )
                 logger.info("Freelancer message from %s on project %s", sender, project_id or "direct")
+                _log_activity("message_received", f"Message from {sender}: {preview[:80]}", {"sender": sender, "project": title or project_id, "status": status})
 
                 if not AUTO_REPLY_ENABLED or not thread_id or not preview:
                     continue
@@ -828,6 +851,7 @@ async def _generate_and_send_quote(
         if send_resp.status_code == 200:
             _record_reply(thread_id)
             quoted_str = f"${eval_result.get('quoted_price_usd', 0):.2f}" if eval_result else "custom"
+            _log_activity("quote_sent", f"Quote {quoted_str} sent to {sender} — {title[:50] or 'DM'}", {"sender": sender, "project": title, "price": quoted_str, "reply_preview": reply_text[:100]})
             await telegram_notify(
                 f"QUOTE SENT on Freelancer\n"
                 f"To: {sender}\n"
@@ -933,6 +957,7 @@ async def _auto_reply_to_message(
 
         if send_resp.status_code == 200:
             _record_reply(thread_id)
+            _log_activity("auto_reply", f"Replied to {sender} — {title[:50] or 'DM'}", {"sender": sender, "project": title, "reply_preview": reply_text[:150]})
             await telegram_notify(
                 f"AUTO-REPLIED on Freelancer\n"
                 f"To: {sender}\n"
@@ -1111,6 +1136,14 @@ async def auto_reply_status():
         "active_threads": len(_reply_tracker),
         "rate_limited_threads": sum(1 for t in _reply_tracker if _is_rate_limited(t)),
     }
+
+
+@app.get("/activity")
+async def get_activity(limit: int = 50, event_type: str = ""):
+    logs = _activity_log
+    if event_type:
+        logs = [e for e in logs if e["type"] == event_type]
+    return {"events": logs[:limit], "total": len(_activity_log)}
 
 
 @app.post("/auto-reply/trigger")
