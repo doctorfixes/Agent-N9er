@@ -194,7 +194,103 @@ async def _run_scan_cycle():
             f"New prospects: {total_new}\n"
             f"Platforms: {', '.join(SCAN_PLATFORMS)}"
         )
+
+    if FREELANCER_AUTO_BID and total_new > 0:
+        try:
+            bids_placed = await _auto_evaluate_and_bid(svc=svc)
+            if bids_placed > 0:
+                logger.info("Auto-bid cycle placed %d bids", bids_placed)
+        except Exception as e:
+            logger.warning("Auto-bid cycle failed: %s", e)
+
     return results
+
+
+async def _auto_evaluate_and_bid(svc=None):
+    if svc is None:
+        svc = _svc_headers()
+    bids_placed = 0
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        prospects_resp = await client.get(
+            f"{PROSPECTOR_URL}/prospects",
+            params={"status": "discovered", "platform": "freelancer", "limit": 20},
+            headers=svc,
+        )
+        prospects_resp.raise_for_status()
+        prospects = prospects_resp.json()
+
+        for prospect in prospects:
+            pid = prospect["id"]
+            try:
+                eval_resp = await client.post(
+                    f"{PROSPECTOR_URL}/prospects/{pid}/evaluate",
+                    headers=svc,
+                )
+                eval_resp.raise_for_status()
+                eval_data = eval_resp.json()
+
+                if eval_data.get("status") != "approved":
+                    continue
+
+                evaluation = eval_data.get("evaluation", {})
+                quoted = evaluation.get("quoted_price_usd", 0)
+                if quoted <= 0:
+                    continue
+
+                proposal_text = ""
+                try:
+                    prop_resp = await client.post(
+                        f"{EXECUTION_URL}/proposal",
+                        json={
+                            "title": prospect.get("title", ""),
+                            "description": prospect.get("description", ""),
+                            "skills": prospect.get("skills", ""),
+                            "platform": "freelancer",
+                            "budget_max": prospect.get("budget_max", 0),
+                        },
+                        headers=svc,
+                        timeout=30.0,
+                    )
+                    if prop_resp.status_code == 200:
+                        prop_data = prop_resp.json()
+                        if prop_data.get("ok"):
+                            proposal_text = prop_data.get("proposal", "")
+                except Exception as pe:
+                    logger.warning("Proposal generation failed for %s: %s", pid[:8], pe)
+
+                bid_resp = await client.post(
+                    f"{PROSPECTOR_URL}/freelancer/bid",
+                    json={
+                        "prospect_id": pid,
+                        "bid_amount": quoted,
+                        "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
+                        "milestone_percentage": 100.0,
+                        "description": proposal_text,
+                    },
+                    headers=svc,
+                )
+                if bid_resp.status_code == 200:
+                    bid_data = bid_resp.json()
+                    bids_placed += 1
+                    logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], quoted)
+                    await telegram_notify(
+                        f"BID PLACED\n"
+                        f"Project: {prospect.get('title', 'Unknown')}\n"
+                        f"Amount: ${quoted:.2f}\n"
+                        f"Bid ID: {bid_data.get('bid_id')}\n"
+                        f"URL: {prospect.get('url', '')}"
+                    )
+                else:
+                    logger.warning("Freelancer auto-bid failed for %s: %s", pid[:8], bid_resp.text)
+                    await telegram_notify(
+                        f"BID FAILED\n"
+                        f"Project: {prospect.get('title', 'Unknown')}\n"
+                        f"Reason: {bid_resp.text}"
+                    )
+            except Exception as e:
+                logger.warning("Auto-bid error for %s: %s", pid[:8], e)
+            await asyncio.sleep(2)
+    return bids_placed
 
 
 @asynccontextmanager
