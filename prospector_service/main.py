@@ -1729,15 +1729,21 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                 if context_type == "project":
                     project_id = str(context.get("id", ""))
 
+                members = thread.get("members", [])
                 other_members = [
-                    m for m in thread.get("members", [])
+                    m for m in members
                     if str(m) != str(FREELANCER_USER_ID)
                 ]
-                sender_id = other_members[0] if other_members else None
+                sender_id = other_members[0] if other_members else (members[0] if members else None)
                 sender_name = ""
-                if sender_id and str(sender_id) in users:
-                    u = users[str(sender_id)]
-                    sender_name = u.get("display_name") or u.get("username", "")
+                if sender_id:
+                    for uid_key in [str(sender_id), int(sender_id) if str(sender_id).isdigit() else None]:
+                        if uid_key is not None and uid_key in users:
+                            u = users[uid_key]
+                            sender_name = u.get("display_name") or u.get("public_name") or u.get("username") or ""
+                            break
+                    if not sender_name:
+                        sender_name = thread.get("owner", {}).get("display_name") or thread.get("owner", {}).get("username") or f"User#{sender_id}"
 
                 prospect = None
                 if project_id:
@@ -1751,6 +1757,14 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                         if row:
                             prospect = dict(row)
 
+                last_msg_raw = thread.get("last_message") or thread.get("message") or ""
+                if isinstance(last_msg_raw, dict):
+                    last_msg_text = last_msg_raw.get("message", "") or last_msg_raw.get("text", "") or last_msg_raw.get("snippet", "")
+                    last_msg_from = last_msg_raw.get("from_user")
+                else:
+                    last_msg_text = str(last_msg_raw) if last_msg_raw else ""
+                    last_msg_from = None
+
                 messages.append({
                     "thread_id": thread_id,
                     "project_id": project_id,
@@ -1758,7 +1772,8 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
                     "sender_id": sender_id,
                     "message_count": thread.get("message_count", 0),
                     "is_read": thread.get("is_read", True),
-                    "last_message": thread.get("last_message", {}).get("message", ""),
+                    "last_message": last_msg_text,
+                    "last_message_from": last_msg_from,
                     "last_message_time": thread.get("time_updated"),
                     "context_type": context_type,
                     "prospect": prospect,
@@ -1775,6 +1790,24 @@ async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
         raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+@app.get("/freelancer/messages/raw")
+async def get_freelancer_messages_raw(limit: int = 5):
+    """Debug: return raw Freelancer API response for message threads."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                params={"limit": limit, "message_context_details": "true", "user_details": "true"},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/freelancer/thread/{thread_id}")
