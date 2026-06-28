@@ -326,3 +326,218 @@ async def test_github_accepts_valid_signature(client):
         assert resp.json()["action"] == "ignored"
     finally:
         browser.GITHUB_WEBHOOK_SECRET = original_secret
+
+
+# --- Signal log tests ---
+
+async def test_signals_endpoint(client):
+    """Test the /signals endpoint returns logged signals."""
+    browser.signal_log.clear()
+    resp = await client.get("/signals")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+async def test_signals_populated_after_webhook(client):
+    """Test that signals get logged after webhook processing."""
+    browser.signal_log.clear()
+    with _mock_orchestrator():
+        await client.post(
+            "/webhooks/github",
+            json={
+                "action": "opened",
+                "issue": {
+                    "title": "Bug fix needed",
+                    "number": 99,
+                    "html_url": "https://github.com/test/repo/issues/99",
+                    "body": "Fix this",
+                    "labels": [],
+                },
+                "repository": {"full_name": "test/repo"},
+            },
+            headers={"X-GitHub-Event": "issues"},
+        )
+    resp = await client.get("/signals")
+    data = resp.json()
+    assert len(data) >= 1
+    assert data[0]["source"] == "github"
+    assert data[0]["event_type"] == "issue.opened"
+
+
+# --- Forward to pipeline failure tests ---
+
+async def test_forward_to_pipeline_unreachable(client):
+    """Test that 503 is returned when the orchestrator is unreachable."""
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"status": "error"}
+    mock_resp.raise_for_status = MagicMock()
+    with patch.object(
+        browser, "retry_request",
+        AsyncMock(side_effect=browser.httpx.RequestError("Connection refused")),
+    ):
+        resp = await client.post(
+            "/webhooks/generic",
+            json={"objective": "Run task", "source": "test"},
+        )
+    assert resp.status_code == 503
+
+
+# --- GitHub PR ready_for_review event ---
+
+async def test_github_pr_ready_for_review(client):
+    """Test handling of pull_request ready_for_review event."""
+    with _mock_orchestrator():
+        resp = await client.post(
+            "/webhooks/github",
+            json={
+                "action": "ready_for_review",
+                "pull_request": {
+                    "title": "Feature ready",
+                    "number": 20,
+                    "html_url": "https://github.com/test/repo/pull/20",
+                    "body": "Ready to review",
+                    "draft": False,
+                },
+                "repository": {"full_name": "test/repo"},
+            },
+            headers={"X-GitHub-Event": "pull_request"},
+        )
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["event"] == "pr.ready_for_review"
+
+
+# --- GitHub push to non-main branch (ignored) ---
+
+async def test_github_push_non_main_branch(client):
+    """Test that pushes to non-main branches are ignored."""
+    resp = await client.post(
+        "/webhooks/github",
+        json={
+            "ref": "refs/heads/feature-branch",
+            "commits": [{"message": "wip"}],
+            "repository": {"full_name": "test/repo"},
+        },
+        headers={"X-GitHub-Event": "push"},
+    )
+    data = resp.json()
+    assert data["action"] == "ignored"
+
+
+# --- GitHub push with no commits ---
+
+async def test_github_push_no_commits(client):
+    """Test that pushes with no commits are ignored."""
+    resp = await client.post(
+        "/webhooks/github",
+        json={
+            "ref": "refs/heads/main",
+            "commits": [],
+            "repository": {"full_name": "test/repo"},
+        },
+        headers={"X-GitHub-Event": "push"},
+    )
+    data = resp.json()
+    assert data["action"] == "ignored"
+
+
+# --- GitHub unknown event type ---
+
+async def test_github_unknown_event_type(client):
+    """Test that unknown GitHub event types are ignored."""
+    resp = await client.post(
+        "/webhooks/github",
+        json={"action": "completed", "check_run": {}},
+        headers={"X-GitHub-Event": "check_run"},
+    )
+    data = resp.json()
+    assert data["action"] == "ignored"
+
+
+# --- Slack message with /task prefix ---
+
+async def test_slack_task_with_slash_prefix(client):
+    """Test Slack message starting with /task prefix."""
+    with _mock_orchestrator():
+        resp = await client.post("/webhooks/slack", json={
+            "event": {
+                "type": "message",
+                "text": "/task Deploy to production",
+                "channel": "C789",
+                "user": "U111",
+            },
+        })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["event"] == "message.task"
+
+
+# --- Slack bot message ignored ---
+
+async def test_slack_bot_message_ignored(client):
+    """Test that messages from bots are ignored."""
+    resp = await client.post("/webhooks/slack", json={
+        "event": {
+            "type": "message",
+            "text": "task: do something",
+            "channel": "C123",
+            "user": "U456",
+            "bot_id": "B999",
+        },
+    })
+    data = resp.json()
+    assert data["action"] == "ignored"
+
+
+# --- Generic webhook with title ---
+
+async def test_generic_webhook_with_title(client):
+    """Test generic webhook using 'title' field instead of 'objective'."""
+    with _mock_orchestrator():
+        resp = await client.post("/webhooks/generic", json={
+            "title": "Run database backup",
+            "source": "cron",
+        })
+    assert resp.json()["ok"] == 1
+
+
+# --- Generic webhook with message ---
+
+async def test_generic_webhook_with_message(client):
+    """Test generic webhook using 'message' field."""
+    with _mock_orchestrator():
+        resp = await client.post("/webhooks/generic", json={
+            "message": "Trigger cleanup job",
+            "source": "scheduler",
+        })
+    assert resp.json()["ok"] == 1
+
+
+# --- Slack timestamp-expired signature ---
+
+async def test_slack_signature_expired_timestamp(client):
+    """Test that Slack requests with timestamps older than 5 minutes are rejected."""
+    original_secret = browser.SLACK_SIGNING_SECRET
+    try:
+        secret = "test_expire_secret"
+        browser.SLACK_SIGNING_SECRET = secret
+        body = json.dumps({"event": {"type": "message", "text": "task: test"}})
+        # Timestamp from 10 minutes ago
+        old_timestamp = str(int(time.time()) - 600)
+        sig_basestring = f"v0:{old_timestamp}:{body}"
+        signature = "v0=" + hmac.new(
+            secret.encode(), sig_basestring.encode(), hashlib.sha256
+        ).hexdigest()
+
+        resp = await client.post(
+            "/webhooks/slack",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Slack-Request-Timestamp": old_timestamp,
+                "X-Slack-Signature": signature,
+            },
+        )
+        assert resp.status_code == 401
+    finally:
+        browser.SLACK_SIGNING_SECRET = original_secret

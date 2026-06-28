@@ -1,5 +1,7 @@
 import pytest
-from shared.rbac import Role, has_permission, get_user_permissions, ROLE_HIERARCHY
+from unittest.mock import AsyncMock, MagicMock
+
+from shared.rbac import Role, has_permission, get_user_permissions, ROLE_HIERARCHY, RBACMiddleware, require_permission
 
 
 class TestRoleHierarchy:
@@ -78,3 +80,176 @@ class TestGetUserPermissions:
         viewer_perms = set(get_user_permissions("viewer"))
         assert viewer_perms.issubset(operator_perms)
         assert operator_perms.issubset(admin_perms)
+
+
+def _make_request(path, method="GET", user_role=None):
+    """Create a mock request for middleware testing."""
+    request = MagicMock()
+    request.url.path = path
+    request.method = method
+    request.state = MagicMock()
+    if user_role is not None:
+        request.state.user_role = user_role
+    else:
+        # Simulate no role on request
+        del request.state.user_role
+        type(request.state).user_role = property(lambda self: (_ for _ in ()).throw(AttributeError()))
+    return request
+
+
+class TestRBACMiddleware:
+    async def test_open_path_passes_through(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/health", "GET", user_role="viewer")
+        expected_response = MagicMock()
+
+        async def call_next(req):
+            return expected_response
+
+        result = await middleware.dispatch(request, call_next)
+        assert result is expected_response
+
+    async def test_open_path_docs(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/docs", "GET", user_role="viewer")
+
+        async def call_next(req):
+            return MagicMock()
+
+        result = await middleware.dispatch(request, call_next)
+        # Should pass through without checking permissions
+        assert result is not None
+
+    async def test_no_role_passes_through(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/agents", "GET", user_role=None)
+        expected_response = MagicMock()
+
+        async def call_next(req):
+            return expected_response
+
+        # getattr(request.state, "user_role", None) should return None
+        request.state = MagicMock(spec=[])  # no attributes
+        result = await middleware.dispatch(request, call_next)
+        assert result is expected_response
+
+    async def test_sufficient_permission_passes(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/agents", "GET", user_role="viewer")
+        expected_response = MagicMock()
+
+        async def call_next(req):
+            return expected_response
+
+        result = await middleware.dispatch(request, call_next)
+        assert result is expected_response
+
+    async def test_insufficient_permission_returns_403(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/admin/users", "POST", user_role="viewer")
+
+        async def call_next(req):
+            return MagicMock()
+
+        result = await middleware.dispatch(request, call_next)
+        assert result.status_code == 403
+
+    async def test_admin_can_access_admin_routes(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/admin/users", "POST", user_role="admin")
+        expected_response = MagicMock()
+
+        async def call_next(req):
+            return expected_response
+
+        result = await middleware.dispatch(request, call_next)
+        assert result is expected_response
+
+    async def test_operator_cannot_access_admin_routes(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/admin/apikeys", "POST", user_role="operator")
+
+        async def call_next(req):
+            return MagicMock()
+
+        result = await middleware.dispatch(request, call_next)
+        assert result.status_code == 403
+
+    async def test_unmatched_route_passes_through(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        request = _make_request("/some/random/path", "GET", user_role="viewer")
+        expected_response = MagicMock()
+
+        async def call_next(req):
+            return expected_response
+
+        result = await middleware.dispatch(request, call_next)
+        assert result is expected_response
+
+    async def test_trailing_slash_stripped(self):
+        middleware = RBACMiddleware(app=MagicMock())
+        # /admin/users/ with trailing slash should match /admin/users
+        request = _make_request("/admin/users/", "POST", user_role="viewer")
+
+        async def call_next(req):
+            return MagicMock()
+
+        result = await middleware.dispatch(request, call_next)
+        assert result.status_code == 403
+
+
+class TestRequirePermission:
+    async def test_allows_sufficient_permissions(self):
+        @require_permission("system:read")
+        async def handler(request):
+            return {"status": "ok"}
+
+        request = MagicMock()
+        request.state = MagicMock()
+        request.state.user_role = "viewer"
+
+        result = await handler(request)
+        assert result == {"status": "ok"}
+
+    async def test_blocks_insufficient_permissions(self):
+        @require_permission("system:admin")
+        async def handler(request):
+            return {"status": "ok"}
+
+        request = MagicMock()
+        request.state = MagicMock()
+        request.state.user_role = "viewer"
+
+        result = await handler(request)
+        assert result.status_code == 403
+
+    async def test_uses_request_from_kwargs(self):
+        @require_permission("system:admin")
+        async def handler(request=None):
+            return {"status": "ok"}
+
+        request = MagicMock()
+        request.state = MagicMock()
+        request.state.user_role = "admin"
+
+        result = await handler(request=request)
+        assert result == {"status": "ok"}
+
+    async def test_defaults_to_viewer_when_no_role(self):
+        @require_permission("system:admin")
+        async def handler(request):
+            return {"status": "ok"}
+
+        request = MagicMock()
+        request.state = MagicMock(spec=[])  # no user_role attribute
+
+        result = await handler(request)
+        assert result.status_code == 403
+
+    async def test_no_request_passes_through(self):
+        @require_permission("system:admin")
+        async def handler():
+            return {"status": "ok"}
+
+        result = await handler()
+        assert result == {"status": "ok"}

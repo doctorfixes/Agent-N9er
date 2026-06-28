@@ -1,7 +1,8 @@
 import os
+import time
 import pytest
 import asyncio
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ["AUDIT_DB_PATH"] = "/tmp/test_audit.db"
 
@@ -12,6 +13,8 @@ from shared.audit import (
     _classify_action,
     _extract_resource,
     _audit_log,
+    AuditMiddleware,
+    SKIP_PATHS,
 )
 
 
@@ -111,3 +114,152 @@ class TestAuditLogging:
         result = await query_audit_logs(limit=2, offset=0, user_id="pager")
         assert len(result["entries"]) == 2
         assert result["total"] >= 5
+
+    async def test_query_filter_by_resource_type(self):
+        await record_audit_event(action="test.rt", user_id="u1", resource_type="agents")
+        await record_audit_event(action="test.rt", user_id="u1", resource_type="tasks")
+
+        result = await query_audit_logs(resource_type="agents")
+        assert all(e["resource_type"] == "agents" for e in result["entries"])
+
+    async def test_query_filter_by_since(self):
+        await record_audit_event(action="test.since", user_id="u1")
+        # Use a far-future timestamp so nothing matches
+        result = await query_audit_logs(since="2099-01-01T00:00:00")
+        assert result["total"] == 0
+
+    async def test_query_filter_by_until(self):
+        await record_audit_event(action="test.until", user_id="u1")
+        # Use a far-past timestamp so nothing matches
+        result = await query_audit_logs(until="2000-01-01T00:00:00")
+        assert result["total"] == 0
+
+    async def test_query_filter_since_and_until_bracket(self):
+        await record_audit_event(action="test.bracket", user_id="u1")
+        # Use a wide bracket that includes now
+        result = await query_audit_logs(since="2020-01-01T00:00:00", until="2099-12-31T23:59:59")
+        assert result["total"] >= 1
+
+
+class TestClassifyActionBid:
+    def test_post_bid(self):
+        assert _classify_action("POST", "/bid/submit") == "bid.submit"
+
+    def test_post_bid_nested(self):
+        assert _classify_action("POST", "/api/bid") == "bid.submit"
+
+
+class TestAuditMiddleware:
+    async def test_skip_paths_pass_through(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        for path in ["/health", "/docs", "/openapi.json", "/redoc", "/favicon.ico"]:
+            request = MagicMock()
+            request.url.path = path
+            expected_response = MagicMock()
+
+            async def call_next(req):
+                return expected_response
+
+            result = await middleware.dispatch(request, call_next)
+            assert result is expected_response
+
+    async def test_skip_prefixes_pass_through(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        for path in ["/_next/data/something", "/static/css/style.css"]:
+            request = MagicMock()
+            request.url.path = path
+            expected_response = MagicMock()
+
+            async def call_next(req):
+                return expected_response
+
+            result = await middleware.dispatch(request, call_next)
+            assert result is expected_response
+
+    async def test_successful_get_not_audited(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        request = MagicMock()
+        request.url.path = "/agents"
+        request.method = "GET"
+        request.state = MagicMock()
+        request.state.user_id = "testuser"
+        request.state.user_role = "viewer"
+        request.state.request_id = "req-123"
+        request.client.host = "127.0.0.1"
+
+        response = MagicMock()
+        response.status_code = 200
+
+        async def call_next(req):
+            return response
+
+        _audit_log.clear()
+        result = await middleware.dispatch(request, call_next)
+        assert result is response
+
+    async def test_post_request_is_audited(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        request = MagicMock()
+        request.url.path = "/pipeline/full"
+        request.method = "POST"
+        request.state = MagicMock()
+        request.state.user_id = "testuser"
+        request.state.user_role = "operator"
+        request.state.request_id = "req-456"
+        request.client.host = "10.0.0.1"
+
+        response = MagicMock()
+        response.status_code = 200
+
+        async def call_next(req):
+            return response
+
+        _audit_log.clear()
+        result = await middleware.dispatch(request, call_next)
+        assert result is response
+        assert len(_audit_log) >= 1
+        assert _audit_log[0]["action"] == "pipeline.execute"
+
+    async def test_error_response_is_audited(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        request = MagicMock()
+        request.url.path = "/agents"
+        request.method = "GET"
+        request.state = MagicMock()
+        request.state.user_id = "failuser"
+        request.state.user_role = "viewer"
+        request.state.request_id = None
+        request.client.host = "127.0.0.1"
+
+        response = MagicMock()
+        response.status_code = 500
+
+        async def call_next(req):
+            return response
+
+        _audit_log.clear()
+        result = await middleware.dispatch(request, call_next)
+        assert result is response
+        assert len(_audit_log) >= 1
+        assert _audit_log[0]["action"] == "read"
+
+    async def test_no_client_uses_unknown_ip(self):
+        middleware = AuditMiddleware(app=MagicMock())
+        request = MagicMock()
+        request.url.path = "/pipeline"
+        request.method = "POST"
+        request.state = MagicMock()
+        request.state.user_id = "testuser"
+        request.state.user_role = "operator"
+        request.state.request_id = None
+        request.client = None
+
+        response = MagicMock()
+        response.status_code = 200
+
+        async def call_next(req):
+            return response
+
+        _audit_log.clear()
+        result = await middleware.dispatch(request, call_next)
+        assert _audit_log[0]["ip_address"] == "unknown"

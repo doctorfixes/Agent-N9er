@@ -205,3 +205,229 @@ class TestPasswordHashing:
         h1 = _hash_password("pass1")
         h2 = _hash_password("pass2")
         assert h1 != h2
+
+
+class TestSystemHealth:
+    @pytest.mark.asyncio
+    async def test_system_health_all_unreachable(self):
+        """Test /system/health when all services are unreachable."""
+        async with _client() as client:
+            resp = await client.get("/system/health")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "overall" in data
+            assert "healthy_count" in data
+            assert "total_count" in data
+            assert "services" in data
+            assert "checked_at" in data
+            # All services should be unreachable since nothing is running
+            assert data["overall"] in ("down", "degraded")
+            for name, info in data["services"].items():
+                assert info["status"] in ("unreachable", "healthy", "degraded")
+
+
+class TestAuthenticateUser:
+    @pytest.mark.asyncio
+    async def test_authenticate_nonexistent_user(self):
+        async with _client() as client:
+            resp = await client.post("/admin/users/authenticate", json={
+                "username": "nonexistent", "password": "anything"
+            })
+            assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_authenticate_returns_permissions(self):
+        async with _client() as client:
+            resp = await client.post("/admin/users/authenticate", json={
+                "username": "admin", "password": "admin"
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert isinstance(data["permissions"], list)
+            assert len(data["permissions"]) > 0
+
+
+class TestAPIKeyCreateAndRevoke:
+    @pytest.mark.asyncio
+    async def test_create_key_with_custom_role(self):
+        async with _client() as client:
+            resp = await client.post("/admin/apikeys", json={
+                "name": "Operator Key",
+                "role": "operator",
+                "expires_in_days": 60,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["api_key"].startswith("n9er_")
+
+    @pytest.mark.asyncio
+    async def test_revoke_nonexistent_key(self):
+        async with _client() as client:
+            resp = await client.delete("/admin/apikeys/nonexistent-key-id")
+            assert resp.status_code == 404
+
+
+class TestGetConfig:
+    @pytest.mark.asyncio
+    async def test_get_config_empty(self):
+        async with _client() as client:
+            resp = await client.get("/admin/config")
+            assert resp.status_code == 200
+            assert isinstance(resp.json(), dict)
+
+    @pytest.mark.asyncio
+    async def test_update_config_skips_underscore_keys(self):
+        async with _client() as client:
+            resp = await client.post("/admin/config", json={
+                "_internal": "hidden",
+                "visible_key": "value",
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "visible_key" in data["updated"]
+            assert "_internal" not in data["updated"]
+
+
+class TestBulkDispatchTasks:
+    @pytest.mark.asyncio
+    async def test_bulk_dispatch_all_fail(self):
+        """Test bulk task dispatch when orchestrator is unreachable."""
+        from unittest.mock import patch, AsyncMock
+        import httpx as _httpx
+
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = _httpx.ConnectError("connection refused")
+
+        with patch("enterprise_tools.main.httpx.AsyncClient") as MockClass:
+            MockClass.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClass.return_value.__aexit__ = AsyncMock(return_value=False)
+            async with _client() as client:
+                resp = await client.post("/bulk/tasks", json={
+                    "objectives": ["task 1", "task 2"],
+                    "mode": "publish",
+                    "source": "test",
+                })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["failed"] == 2
+        assert data["dispatched"] == 0
+
+    @pytest.mark.asyncio
+    async def test_bulk_dispatch_full_mode(self):
+        """Test bulk task dispatch in full pipeline mode."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"status": "completed", "task_id": "t1"}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with patch("enterprise_tools.main.httpx.AsyncClient") as MockClass:
+            MockClass.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClass.return_value.__aexit__ = AsyncMock(return_value=False)
+            async with _client() as client:
+                resp = await client.post("/bulk/tasks", json={
+                    "objectives": ["task 1"],
+                    "mode": "full",
+                    "source": "test",
+                })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["dispatched"] == 1
+
+
+class TestBulkRegisterAgents:
+    @pytest.mark.asyncio
+    async def test_bulk_register_all_fail(self):
+        """Test bulk agent registration when orchestrator is unreachable."""
+        from unittest.mock import patch, AsyncMock
+        import httpx as _httpx
+
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = _httpx.ConnectError("connection refused")
+
+        with patch("enterprise_tools.main.httpx.AsyncClient") as MockClass:
+            MockClass.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClass.return_value.__aexit__ = AsyncMock(return_value=False)
+            async with _client() as client:
+                resp = await client.post("/bulk/agents", json={
+                    "agents": [
+                        {"agent_id": "a1", "profile": "speed"},
+                        {"agent_id": "a2", "profile": "precision"},
+                    ],
+                })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["failed"] == 2
+        assert data["registered"] == 0
+
+
+class TestExportAuditCSV:
+    @pytest.mark.asyncio
+    async def test_export_audit_csv(self):
+        async with _client() as client:
+            # Generate some audit events first
+            await client.post("/admin/users", json={
+                "username": "exportuser", "password": "pass", "role": "viewer"
+            })
+
+            resp = await client.get("/export/audit")
+            assert resp.status_code == 200
+            assert "text/csv" in resp.headers["content-type"]
+            content = resp.text
+            # Should have CSV header
+            assert "id" in content
+            assert "timestamp" in content
+            assert "action" in content
+
+    @pytest.mark.asyncio
+    async def test_export_audit_csv_with_params(self):
+        async with _client() as client:
+            resp = await client.get("/export/audit", params={
+                "limit": 10,
+                "since": "2020-01-01",
+            })
+            assert resp.status_code == 200
+            assert "text/csv" in resp.headers["content-type"]
+
+
+class TestExportAgentsCSV:
+    @pytest.mark.asyncio
+    async def test_export_agents_csv_unreachable(self):
+        """Test agent export when orchestrator is unreachable."""
+        from unittest.mock import patch, AsyncMock
+        import httpx as _httpx
+
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = _httpx.ConnectError("connection refused")
+
+        with patch("enterprise_tools.main.httpx.AsyncClient") as MockClass:
+            MockClass.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClass.return_value.__aexit__ = AsyncMock(return_value=False)
+            async with _client() as client:
+                resp = await client.get("/export/agents")
+        assert resp.status_code == 503
+
+
+class TestSystemOverview:
+    @pytest.mark.asyncio
+    async def test_system_overview(self):
+        """Test the system overview endpoint."""
+        async with _client() as client:
+            resp = await client.get("/system/overview")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "timestamp" in data
+            assert "services" in data
+            assert "agents" in data
+            assert "tasks" in data
+            assert "users" in data
+            assert "api_keys" in data
+            # Users should be > 0 due to default seeding
+            assert data["users"] >= 3
