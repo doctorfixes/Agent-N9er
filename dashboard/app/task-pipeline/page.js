@@ -3,7 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json());
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 const STATUS_STYLES = {
   published:  { bg: "#1e3a5f", color: "#60a5fa" },
@@ -41,7 +41,7 @@ export default function TaskPipelinePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ objective }),
       });
-      const result = await resp.json();
+      const result = await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } });
       setSubmitResult(result);
       setObjective("");
       mutate();

@@ -10,7 +10,7 @@ function svcHeaders() {
 export async function GET() {
   try {
     const resp = await fetch(`${MARKETPLACE_URL}/feed`, { headers: svcHeaders() });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data);
   } catch {
     return Response.json([], { status: 502 });

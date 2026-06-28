@@ -5,6 +5,7 @@ COPY recurring_engine/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ ./shared/
 COPY recurring_engine/main.py .
+RUN mkdir -p /data && chown app:app /data
 USER app
 EXPOSE 8600
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8600/health')" || exit 1

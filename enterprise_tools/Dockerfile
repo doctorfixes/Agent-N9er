@@ -5,6 +5,7 @@ COPY enterprise_tools/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ ./shared/
 COPY enterprise_tools/main.py .
+RUN mkdir -p /data && chown app:app /data
 USER app
 EXPOSE 9300
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:9300/health')" || exit 1

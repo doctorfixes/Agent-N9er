@@ -257,13 +257,22 @@ async def get_audit_log(
         ]
 
 
+def _safe_json(val):
+    if not val:
+        return {}
+    try:
+        return json.loads(val)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 def _task_from_row(row):
     return {
         "id": row["id"],
         "objective": row["objective"],
         "priority_score": row["priority_score"],
         "status": row["status"],
-        "inputs": json.loads(row["inputs"]) if row["inputs"] else {},
+        "inputs": _safe_json(row["inputs"]),
         "source": row["source"],
         "published_at": row["published_at"],
         "awarded_to": row["awarded_to"],

@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json());
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 const SOURCE_COLORS = {
   github: "#6366f1",

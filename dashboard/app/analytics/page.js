@@ -3,7 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(30);

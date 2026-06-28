@@ -29,7 +29,7 @@ export async function GET() {
           headers: svcHeaders(),
           signal: AbortSignal.timeout(3000),
         });
-        const data = await resp.json();
+        let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
         results[name] = { status: data.ok === 1 ? "healthy" : "degraded", ...data };
       } catch {
         results[name] = { status: "unreachable", ok: 0 };

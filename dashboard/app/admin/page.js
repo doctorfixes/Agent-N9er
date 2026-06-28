@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 function Panel({ title, dot, children, actions }) {
   return (
@@ -285,7 +285,7 @@ function APIKeysTab() {
         body: JSON.stringify(newKey),
       });
       if (resp.ok) {
-        const data = await resp.json();
+        const data = await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } });
         setCreatedKey(data.api_key);
         setNewKey({ name: "", role: "viewer", expires_in_days: 90 });
         mutate();
@@ -606,7 +606,7 @@ function BulkOpsTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "tasks", objectives: lines, mode }),
       });
-      const data = await resp.json();
+      const data = await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } });
       setResults(data);
     } catch (e) {
       setResults({ error: e.message });

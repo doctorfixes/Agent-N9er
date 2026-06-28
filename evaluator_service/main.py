@@ -19,17 +19,36 @@ logger = logging.getLogger("evaluator")
 
 DB_PATH = os.getenv("EVALUATOR_DB_PATH", "/data/evaluator.db")
 MINIMUM_QUOTE_USD = float(os.getenv("MINIMUM_QUOTE_USD", "5.00"))
+PLATFORM_FEE_RATE = float(os.getenv("PLATFORM_FEE_RATE", "0.10"))
 
 COMPLEXITY_SIGNALS = {
     "expert": ["architecture", "system design", "distributed", "migration", "security audit",
-               "machine learning", "ml pipeline", "infrastructure", "scalability"],
+               "machine learning", "ml pipeline", "infrastructure", "scalability",
+               "microservices", "kubernetes", "ci/cd pipeline", "real-time", "concurrency",
+               "blockchain", "smart contract", "compiler", "language server"],
     "complex": ["api", "database", "integration", "full-stack", "deployment", "testing",
-                "refactor", "optimization", "authentication", "payment"],
+                "refactor", "optimization", "authentication", "payment",
+                "websocket", "graphql", "oauth", "docker", "aws", "gcp", "azure",
+                "react", "next.js", "django", "flask", "fastapi", "typescript"],
     "moderate": ["web app", "script", "automation", "dashboard", "crud", "form",
-                 "landing page", "email", "report", "data"],
+                 "landing page", "email", "report", "data", "csv", "json",
+                 "scraping", "web scraper", "bot", "discord bot", "telegram bot",
+                 "wordpress", "shopify", "html", "css"],
     "simple": ["fix", "bug", "typo", "update", "change", "edit", "small", "quick",
-               "readme", "docs", "comment"],
-    "trivial": ["hello world", "rename", "formatting", "lint"],
+               "readme", "docs", "comment", "regex", "config", "env"],
+    "trivial": ["hello world", "rename", "formatting", "lint", "spell check"],
+}
+
+AI_ADVANTAGE_SKILLS = {
+    "code_generation", "python", "javascript", "typescript", "react", "api",
+    "data analysis", "automation", "script", "web scraper", "csv", "json",
+    "documentation", "testing", "refactor", "translation", "content",
+    "sql", "regex", "markdown", "yaml", "docker", "ci/cd",
+}
+
+LOW_ADVANTAGE_SKILLS = {
+    "design", "ui/ux", "video editing", "3d modeling", "animation",
+    "photography", "illustration", "voice over", "music",
 }
 
 
@@ -54,6 +73,10 @@ class EvaluationResult(BaseModel):
     quoted_price_usd: float
     markup_multiplier: float
     estimated_profit_usd: float
+    platform_fee_usd: float = 0.0
+    platform_fee_rate: float = 0.10
+    ai_advantage_score: float = 0.5
+    profit_efficiency: float = 0.0
     rejection_reason: str | None = None
 
 
@@ -73,16 +96,68 @@ def estimate_output_tokens(complexity: str, description: str) -> int:
 
 NON_VIABLE_SIGNALS = [
     "phone call", "video call", "in-person", "on-site", "physical",
-    "hardware", "soldering", "printing", "shipping",
+    "hardware", "soldering", "printing", "shipping", "meet in person",
+    "local only", "must be located", "on-premise", "office hours",
+    "native speaker required", "certified professional",
+]
+
+UNDELIVERABLE_SIGNALS = [
+    "lead generation", "lead gen", "lead list", "sales navigator",
+    "linkedin scraping", "linkedin leads", "email scraping",
+    "data scraping", "web scraping", "prospect list",
+    "verified emails", "email harvest", "contact list",
+    "b2b leads", "b2b list", "mailing list", "cold email list",
+    "virtual assistant", "admin assistant", "personal assistant",
+    "data entry", "manual data", "copy paste",
+    "video editing", "video production", "motion graphics",
+    "graphic design", "logo design", "photoshop", "illustrator",
+    "3d modeling", "3d rendering", "cad design",
+    "translation", "transcription", "voice over", "voiceover",
+    "social media management", "social media posting",
+    "seo backlinks", "link building", "guest posting",
+    "phone calls", "appointment setting", "telemarketing",
+]
+
+SCAM_SIGNALS = [
+    "send money", "wire transfer", "western union", "crypto payment upfront",
+    "personal bank", "social security", "ssn", "credit card number",
+    "too good to be true", "guaranteed income",
 ]
 
 
 def check_viability(title: str, description: str) -> str | None:
     text = f"{title} {description}".lower()
+    for signal in SCAM_SIGNALS:
+        if signal in text:
+            return f"Potential scam detected: {signal}"
     for signal in NON_VIABLE_SIGNALS:
         if signal in text:
             return f"Task requires non-digital capability: {signal}"
+    for signal in UNDELIVERABLE_SIGNALS:
+        if signal in text:
+            return f"Task requires external tools/access AI cannot provide: {signal}"
     return None
+
+
+def compute_ai_advantage(title: str, description: str, skills: list[str]) -> float:
+    text = f"{title} {description} {' '.join(skills)}".lower()
+    advantage_hits = sum(1 for s in AI_ADVANTAGE_SKILLS if s in text)
+    disadvantage_hits = sum(1 for s in LOW_ADVANTAGE_SKILLS if s in text)
+    total = advantage_hits + disadvantage_hits
+    if total == 0:
+        return 0.5
+    return min(1.0, advantage_hits / max(total, 1))
+
+
+def compute_profit_efficiency(quoted: float, cost: float, budget_max: float, platform_fee_rate: float = 0.10) -> float:
+    if quoted <= 0:
+        return 0.0
+    net_revenue = quoted * (1 - platform_fee_rate)
+    margin = (net_revenue - cost) / quoted
+    budget_fit = 1.0
+    if budget_max > 0:
+        budget_fit = min(1.0, quoted / budget_max) if quoted <= budget_max else max(0.0, 1.0 - (quoted - budget_max) / quoted)
+    return round(margin * budget_fit, 3)
 
 
 async def _init_db():
@@ -154,18 +229,30 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
     prompt_text = f"{req.title}\n{req.description}"
     cost_est = estimate_cost(prompt_text, tier=tier, expected_output_tokens=output_tokens)
 
-    quoted = max(cost_est.quoted_price_usd, MINIMUM_QUOTE_USD)
+    ai_advantage = compute_ai_advantage(req.title, req.description, req.skills_required)
 
-    if req.budget_max > 0 and quoted > req.budget_max * 1.5:
-        rejection = f"Quoted ${quoted:.2f} exceeds client budget ${req.budget_max:.2f} by too much"
+    if ai_advantage < 0.2:
+        rejection = f"Low AI advantage ({ai_advantage:.0%}) — task favors human skills"
         viable = False
-    elif req.budget_max > 0 and cost_est.estimated_cost_usd > req.budget_max:
-        rejection = f"Token cost ${cost_est.estimated_cost_usd:.2f} alone exceeds budget ${req.budget_max:.2f}"
+    elif req.budget_max > 0 and req.budget_max < MINIMUM_QUOTE_USD * 0.5:
+        rejection = f"Budget ${req.budget_max:.2f} below minimum viable threshold"
         viable = False
     else:
         viable = True
 
-    profit = quoted - cost_est.estimated_cost_usd if viable else 0
+    if viable and req.budget_max > 0:
+        quoted = min(max(cost_est.quoted_price_usd, MINIMUM_QUOTE_USD), req.budget_max * 0.85)
+        quoted = max(quoted, MINIMUM_QUOTE_USD)
+    else:
+        quoted = max(cost_est.quoted_price_usd, MINIMUM_QUOTE_USD)
+
+    if viable and req.budget_max > 0 and cost_est.estimated_cost_usd > req.budget_max:
+        rejection = f"Token cost ${cost_est.estimated_cost_usd:.2f} alone exceeds budget ${req.budget_max:.2f}"
+        viable = False
+
+    platform_fee = quoted * PLATFORM_FEE_RATE if viable else 0
+    profit = quoted - cost_est.estimated_cost_usd - platform_fee if viable else 0
+    prof_efficiency = compute_profit_efficiency(quoted, cost_est.estimated_cost_usd, req.budget_max, PLATFORM_FEE_RATE) if viable else 0
 
     result = EvaluationResult(
         evaluation_id=evaluation_id, viable=viable, complexity=complexity,
@@ -176,6 +263,10 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
         quoted_price_usd=quoted if viable else 0,
         markup_multiplier=MARKUP_MULTIPLIER,
         estimated_profit_usd=round(profit, 4),
+        platform_fee_usd=round(platform_fee, 4),
+        platform_fee_rate=PLATFORM_FEE_RATE,
+        ai_advantage_score=round(ai_advantage, 3),
+        profit_efficiency=prof_efficiency,
         rejection_reason=rejection,
     )
     await _persist_evaluation(result, req.platform, req.title)
@@ -215,6 +306,7 @@ async def pricing():
     return {
         "markup_multiplier": MARKUP_MULTIPLIER,
         "minimum_quote_usd": MINIMUM_QUOTE_USD,
+        "platform_fee_rate": PLATFORM_FEE_RATE,
         "model_tiers": {k: {"model": v["model"], "label": v["label"],
                             "input_cost_per_m": v["input_cost_per_m"],
                             "output_cost_per_m": v["output_cost_per_m"]}

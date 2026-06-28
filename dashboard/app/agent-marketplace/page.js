@@ -3,7 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json());
+const fetcher = (url) => fetch(url).then((r) => r.text()).then((t) => { try { return JSON.parse(t); } catch { return null; } }).catch(() => null);
 
 function ScoreBar({ score }) {
   const pct = Math.min(100, Math.max(0, (score ?? 0) * 100));
@@ -35,7 +35,7 @@ export default function AgentMarketplacePage() {
     setSimResult(null);
     try {
       const resp = await fetch("/api/simulate?n=5", { method: "GET" });
-      setSimResult(await resp.json());
+      setSimResult(await resp.text().then((t) => { try { return JSON.parse(t); } catch { return {}; } }));
     } catch {
       setSimResult({ error: "Simulation failed" });
     }

@@ -14,8 +14,6 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("ranking")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-
 
 app = FastAPI(title="Agent N9er Ranking Engine")
 
@@ -37,6 +35,14 @@ KEYWORD_WEIGHTS = {
     "fix": 1.5,
     "deploy": 1.7,
     "review": 1.0,
+}
+
+AI_SPEED_KEYWORDS = {
+    "python": 1.5, "javascript": 1.5, "typescript": 1.5, "react": 1.3,
+    "api": 1.5, "script": 1.8, "automation": 2.0, "data": 1.3,
+    "scraper": 1.8, "bot": 1.5, "csv": 1.5, "json": 1.5,
+    "documentation": 1.5, "test": 1.3, "refactor": 1.5,
+    "sql": 1.3, "regex": 1.5, "translate": 1.3, "content": 1.0,
 }
 
 
@@ -63,15 +69,27 @@ async def rank(task: dict):
     tier = task.get("tier", "")
     tier_boost = {"highest_leverage": 3.0, "high_roi": 2.0, "operational": 1.0, "creative_technical": 0.5}.get(tier, 0)
 
-    priority_score = round(base_score + keyword_boost + value_boost + tier_boost, 2)
+    ai_boost = sum(AI_SPEED_KEYWORDS.get(w, 0) for w in words)
 
-    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f) category=%s",
+    budget_min = task.get("budget_min", 0) or 0
+    budget_max = task.get("budget_max", 0) or 0
+    budget_boost = 0.0
+    if budget_max > 0:
+        budget_boost = min(budget_max / 100, 5.0)
+        if budget_max >= 500:
+            budget_boost += 2.0
+
+    priority_score = round(base_score + keyword_boost + value_boost + tier_boost + ai_boost + budget_boost, 2)
+
+    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f ai=%.1f budget=%.1f) category=%s",
                 task["id"], priority_score, base_score, keyword_boost, value_boost, tier_boost,
-                task.get("category", "unknown"))
+                ai_boost, budget_boost, task.get("category", "unknown"))
     return {
         "id": task["id"],
         "priority_score": priority_score,
         "category": task.get("category"),
         "tier": tier,
         "value_score": round(value_boost, 2),
+        "ai_speed_boost": round(ai_boost, 2),
+        "budget_boost": round(budget_boost, 2),
     }

@@ -33,6 +33,9 @@ class ExecuteRequest(BaseModel):
     description: str = ""
     complexity: str = "moderate"
     tier: str = ""
+    platform: str = "freelancer"
+    budget: float = 0
+    client: str = ""
 
 
 class ProposalRequest(BaseModel):
@@ -136,9 +139,14 @@ async def execute(request: ExecuteRequest):
 
 
 async def _execute_with_retry(request: ExecuteRequest) -> dict:
-    last_result = None
+    last_result = {"success": False, "error": "No attempts made"}
     for attempt in range(MAX_RETRIES + 1):
-        result = await _execute_live(request)
+        try:
+            result = await _execute_live(request)
+        except Exception as e:
+            logger.error("Execution exception for task %s attempt %d: %s", request.task_id, attempt, e)
+            last_result = {"success": False, "error": str(e)}
+            continue
         if result.get("success"):
             if attempt > 0:
                 result["retries"] = attempt
@@ -159,16 +167,33 @@ async def _execute_live(request: ExecuteRequest) -> dict:
         {
             "role": "system",
             "content": (
-                "You are Agent N9er, an autonomous task execution agent. "
-                "Complete the following task thoroughly and professionally. "
-                "Provide your full deliverable — code, text, analysis, or whatever the task requires. "
-                "Be detailed and production-ready."
+                "You are Agent N9er, an elite autonomous execution agent delivering paid freelance work. "
+                "Your output IS the deliverable the client receives — it must be production-ready.\n\n"
+                "EXECUTION STANDARDS:\n"
+                "- Code tasks: Write complete, runnable code with error handling. Include brief inline "
+                "comments only where logic is non-obvious. Add usage examples.\n"
+                "- Writing tasks: Match the requested tone and format. Be concise. No filler.\n"
+                "- Analysis tasks: Lead with actionable findings, then supporting evidence. Use tables for comparisons.\n"
+                "- Data tasks: Validate inputs, handle edge cases, document assumptions.\n\n"
+                "QUALITY GATES:\n"
+                "- Every code deliverable must handle the happy path AND at least one error path.\n"
+                "- Every analysis must include a confidence level and caveats.\n"
+                "- Never use placeholder text like 'TODO', 'implement later', or 'lorem ipsum'.\n"
+                "- If the task is ambiguous, state your interpretation and deliver against it.\n\n"
+                "OUTPUT FORMAT: Deliver the work directly. No preamble like 'Here is the solution'. "
+                "Start with the deliverable itself."
             ),
         },
         {
             "role": "user",
-            "content": f"Task: {request.objective}\n\n{request.description}" if request.description
-            else f"Task: {request.objective}",
+            "content": (
+                f"Task: {request.objective}\n\n"
+                + (f"Details: {request.description}\n\n" if request.description else "")
+                + (f"Platform: {request.platform}\n" if request.platform else "")
+                + (f"Client: {request.client}\n" if request.client else "")
+                + (f"Budget: ${request.budget:.2f}\n" if request.budget else "")
+                + f"Complexity: {request.complexity}"
+            ),
         },
     ]
 
@@ -387,24 +412,38 @@ async def generate_proposal(req: ProposalRequest):
         return _simulated_proposal(req)
 
     tone_map = {
-        "professional": "formal and professional, emphasizing reliability and expertise",
-        "friendly": "warm and approachable, showing genuine interest",
-        "technical": "technically detailed, demonstrating deep domain knowledge",
-        "concise": "brief and direct, focusing only on key qualifications",
+        "professional": "formal and confident — lead with a specific insight about their problem",
+        "friendly": "warm and direct — show you understood their pain point, not just the job post",
+        "technical": "technically precise — reference specific technologies and architectural patterns",
+        "concise": "ultra-brief — three short paragraphs max, every sentence earns its place",
     }
     tone_desc = tone_map.get(req.tone, tone_map["professional"])
+
+    platform_guidance = {
+        "upwork": "Upwork clients scan dozens of proposals. Your first sentence must prove you read THEIR post, not a template.",
+        "freelancer": "Freelancer.com clients compare many bids. Be specific about deliverables and timeline to stand out.",
+        "github_bounties": "This is an open-source bounty. Reference the specific issue, propose a concrete approach, mention relevant PRs you could build on.",
+    }
+    platform_tip = platform_guidance.get(req.platform, "Tailor the proposal to the platform's norms.")
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You are Agent N9er, an AI-powered freelance agent. Write a compelling "
-                f"proposal/cover letter that is {tone_desc}. "
-                "Include: 1) A hook addressing the client's need, "
-                "2) Relevant capabilities and approach, "
-                "3) Estimated timeline, "
-                "4) A clear call to action. "
-                "Keep it under 300 words. Do NOT include pricing — that's handled separately."
+                "You are Randy, a skilled freelance developer writing a winning bid proposal. "
+                f"Tone: {tone_desc}.\n\n"
+                "PROPOSAL STRUCTURE (adapt, don't follow rigidly):\n"
+                "1. HOOK (1-2 sentences): Show excitement about the project and reference a specific detail from their posting.\n"
+                "2. APPROACH (2-4 sentences): What you'll build/deliver and how. Be concrete — name technologies, patterns, deliverables.\n"
+                "3. TIMELINE: Give a realistic delivery estimate. Most projects: 3-7 days. Complex MVPs: 10-14 days max.\n"
+                "4. CLOSE (1 sentence): Forward-looking — offer to discuss scope in more detail.\n\n"
+                "RULES:\n"
+                "- Under 200 words. Shorter wins.\n"
+                "- Do NOT include pricing — that's handled separately.\n"
+                "- Be warm and enthusiastic, not corporate. Write like a real person, not a template.\n"
+                "- DO reference specific details from the job description to show you read it.\n"
+                "- Use only ASCII characters — no em dashes, curly quotes, or special Unicode.\n"
+                f"- PLATFORM: {platform_tip}"
             ),
         },
         {
@@ -413,26 +452,23 @@ async def generate_proposal(req: ProposalRequest):
                 f"Platform: {req.platform}\n"
                 f"Job Title: {req.title}\n"
                 f"Description: {req.description}\n"
-                f"Required Skills: {req.skills}\n"
-                f"Client Budget: ${req.budget_max}" if req.budget_max else
-                f"Platform: {req.platform}\n"
-                f"Job Title: {req.title}\n"
-                f"Description: {req.description}\n"
                 f"Required Skills: {req.skills}"
+                + (f"\nClient Budget: ${req.budget_max}" if req.budget_max else "")
             ),
         },
     ]
 
     try:
-        result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        result = await complete(messages, tier="deepseek_flash", max_tokens=1024, temperature=0.5)
+        proposal_text = result.content
+        proposal_text = proposal_text.replace("—", "--").replace("–", "-")
+        proposal_text = proposal_text.replace("‘", "'").replace("’", "'")
+        proposal_text = proposal_text.replace("“", '"').replace("”", '"')
         return {
             "ok": 1,
             "prospect_id": req.prospect_id,
-            "proposal": result.content,
+            "proposal": proposal_text,
             "mode": "live",
-            "model": result.model,
-            "cost_usd": result.cost_usd,
-            "tokens": result.input_tokens + result.output_tokens,
         }
     except Exception as e:
         logger.error("Proposal generation failed: %s", e)
@@ -440,23 +476,21 @@ async def generate_proposal(req: ProposalRequest):
 
 
 def _simulated_proposal(req: ProposalRequest) -> dict:
+    skills_list = [s.strip() for s in req.skills.split(",") if s.strip()][:3]
+    skills_mention = f" using {', '.join(skills_list)}" if skills_list else ""
+
     proposal = (
-        f"Thank you for posting \"{req.title}\". "
-        "I have extensive experience with the skills required for this project "
-        "and am confident I can deliver high-quality results. "
-        "My approach would be to first thoroughly analyze the requirements, "
-        "then implement a clean, well-tested solution. "
-        "I typically deliver projects like this within 3-5 business days. "
-        "I'd love to discuss the details further."
+        f"Your project \"{req.title}\" needs a focused, structured approach{skills_mention}. "
+        "I'll start with a requirements review, build the core solution with tests, "
+        "and deliver a clean, documented result. "
+        "Expected delivery: 3-5 business days. "
+        "Happy to discuss specifics — what's your top priority for this project?"
     )
     return {
         "ok": 1,
         "prospect_id": req.prospect_id,
         "proposal": proposal,
         "mode": "simulation",
-        "model": "none",
-        "cost_usd": 0,
-        "tokens": 0,
     }
 
 

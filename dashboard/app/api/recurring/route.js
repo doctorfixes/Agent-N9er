@@ -11,7 +11,7 @@ function svcHeaders() {
 export async function GET() {
   try {
     const resp = await fetch(`${RECURRING_URL}/rules`, { headers: svcHeaders() });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data);
   } catch {
     return Response.json([], { status: 502 });
@@ -27,7 +27,7 @@ export async function POST(request) {
         method: "POST",
         headers: svcHeaders(),
       });
-      const data = await resp.json();
+      let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
       return Response.json(data);
     }
 
@@ -36,7 +36,7 @@ export async function POST(request) {
       headers: svcHeaders(),
       body: JSON.stringify(body),
     });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data);
   } catch {
     return Response.json({ error: "Recurring engine unreachable" }, { status: 502 });

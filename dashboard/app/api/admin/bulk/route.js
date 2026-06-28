@@ -10,7 +10,7 @@ export async function POST(request) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await resp.json();
+    let data; try { data = JSON.parse(await resp.text()); } catch { data = { error: "Empty response" }; }
     return Response.json(data, { status: resp.status });
   } catch (e) {
     return Response.json({ error: e.message }, { status: 502 });

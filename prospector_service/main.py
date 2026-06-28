@@ -7,7 +7,7 @@ import logging
 import smtplib
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -44,6 +44,10 @@ UPWORK_SEARCH_CATEGORIES = os.getenv(
 
 GITHUB_API = "https://api.github.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+FREELANCER_API_BASE = "https://www.freelancer.com/api"
+FREELANCER_OAUTH_TOKEN = os.getenv("FREELANCER_OAUTH_TOKEN", "")
+FREELANCER_USER_ID = os.getenv("FREELANCER_USER_ID", "")
 
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
@@ -185,6 +189,14 @@ class ProspectUpdate(BaseModel):
     notes: str = ""
 
 
+class FreelancerBidRequest(BaseModel):
+    prospect_id: str
+    bid_amount: float = Field(gt=0)
+    period: int = Field(default=7, ge=1, description="Delivery period in days")
+    milestone_percentage: float = Field(default=100.0, ge=0, le=100)
+    description: str = Field(default="", description="Proposal text; auto-generated if empty")
+
+
 def _svc_headers():
     h = {"Content-Type": "application/json"}
     if SERVICE_TOKEN:
@@ -232,6 +244,17 @@ async def _init_db():
             CREATE INDEX IF NOT EXISTS idx_prospect_platform
             ON prospects (platform, created_at DESC)
         """)
+        for col, coltype in [
+            ("thread_id", "TEXT"),
+            ("client_username", "TEXT DEFAULT ''"),
+            ("complexity", "TEXT DEFAULT 'moderate'"),
+            ("tier", "TEXT DEFAULT 'standard'"),
+            ("bid_id", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE prospects ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -700,26 +723,48 @@ async def _scan_onlydust(query: str, category: str, max_results: int) -> list[di
     return prospects
 
 
+def _freelancer_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    if FREELANCER_OAUTH_TOKEN:
+        headers["Freelancer-OAuth-V1"] = FREELANCER_OAUTH_TOKEN
+    return headers
+
+
 @scanner("freelancer")
 async def _scan_freelancer(query: str, category: str, max_results: int) -> list[dict]:
     prospects = []
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            params = {"compact": "true", "limit": max_results, "sort_field": "time_updated",
-                      "project_types[]": "fixed"}
+            params = {
+                "compact": "true",
+                "limit": max_results,
+                "sort_field": "time_updated",
+                "project_types[]": ["fixed", "hourly"],
+                "full_description": "true",
+                "job_details": "true",
+                "user_details": "true",
+            }
             if query:
                 params["query"] = query
-            resp = await client.get("https://www.freelancer.com/api/projects/0.1/projects/active/", params=params)
+            if category:
+                params["jobs[]"] = category
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/projects/active/",
+                params=params,
+                headers=_freelancer_headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
 
             for proj in data.get("result", {}).get("projects", [])[:max_results]:
                 budget = proj.get("budget", {}) or {}
+                owner = proj.get("owner", {}) or {}
+                description = proj.get("description", proj.get("preview_description", "")) or ""
                 prospects.append(_make_prospect(
                     platform="freelancer",
                     job_id=str(proj.get("id", uuid.uuid4())),
                     title=proj.get("title", ""),
-                    description=(proj.get("preview_description", "") or "")[:2000],
+                    description=description[:2000],
                     budget_min=float(budget.get("minimum", 0) or 0),
                     budget_max=float(budget.get("maximum", 0) or 0),
                     url=f"https://www.freelancer.com/projects/{proj.get('seo_url', '')}",
@@ -1148,9 +1193,10 @@ async def evaluate_prospect(prospect_id: str):
         new_status = "approved" if evaluation.get("viable") else "rejected"
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE prospects SET status = ?, evaluation_id = ?, quoted_price = ?, estimated_cost = ? WHERE id = ?",
+                "UPDATE prospects SET status = ?, evaluation_id = ?, quoted_price = ?, estimated_cost = ?, complexity = ?, tier = ? WHERE id = ?",
                 (new_status, evaluation["evaluation_id"], evaluation.get("quoted_price_usd", 0),
-                 evaluation.get("estimated_cost_usd", 0), prospect_id),
+                 evaluation.get("estimated_cost_usd", 0), evaluation.get("complexity", "moderate"),
+                 evaluation.get("recommended_tier", "standard"), prospect_id),
             )
             await db.commit()
 
@@ -1183,7 +1229,7 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
         if timestamp_field:
             await db.execute(
                 f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
-                (update.status, datetime.utcnow().isoformat(), prospect_id),
+                (update.status, datetime.now(timezone.utc).isoformat(), prospect_id),
             )
         else:
             await db.execute(
@@ -1265,6 +1311,666 @@ async def _update_status(prospect_id: str, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE prospects SET status = ? WHERE id = ?", (status, prospect_id))
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Freelancer.com bid submission
+# ---------------------------------------------------------------------------
+
+async def _generate_proposal(title: str, description: str, skills: str, bid_amount: float, period: int) -> str:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from shared.llm import complete, has_available_provider
+
+    if not has_available_provider():
+        return (
+            f"I'd like to work on \"{title}\". "
+            f"I can deliver this within {period} days for ${bid_amount:.2f}. "
+            "I have relevant experience and am ready to start immediately."
+        )
+
+    prompt = f"""Write a winning Freelancer.com bid proposal. Your first sentence must reference
+a specific detail from the project description — prove you read it.
+
+STRUCTURE:
+1. HOOK: Name the client's specific problem (1 sentence, NOT "I am" or "I have").
+2. APPROACH: What you'll deliver and how (2-3 sentences, name specific technologies).
+3. TIMELINE: "{period} days" — state what they get at each milestone if period > 7.
+4. CLOSE: One clear call to action.
+
+RULES:
+- Under 150 words. Shorter wins on Freelancer.com.
+- No generic phrases: "extensive experience", "high-quality", "passionate about".
+- No pricing discussion — the bid amount speaks for itself.
+
+Project Title: {title}
+Description: {description}
+Required Skills: {skills}
+Bid Amount: ${bid_amount:.2f}
+Delivery: {period} days
+
+Write ONLY the proposal text."""
+
+    resp = await complete(
+        messages=[{"role": "user", "content": prompt}],
+        tier="budget",
+        temperature=0.5,
+        max_tokens=512,
+    )
+    return resp.content.strip()
+
+
+@app.post("/freelancer/bid")
+async def submit_freelancer_bid(req: FreelancerBidRequest):
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    prospect = await _get_prospect(req.prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=422, detail="Prospect is not from Freelancer.com")
+
+    project_id = prospect["platform_job_id"]
+    if not project_id:
+        raise HTTPException(status_code=422, detail="Missing Freelancer project ID")
+
+    proposal_text = req.description
+    if not proposal_text:
+        proposal_text = await _generate_proposal(
+            title=prospect["title"],
+            description=prospect.get("description", ""),
+            skills=prospect.get("skills", ""),
+            bid_amount=req.bid_amount,
+            period=req.period,
+        )
+
+    bid_payload = {
+        "project_id": int(project_id),
+        "bidder_id": int(FREELANCER_USER_ID) if FREELANCER_USER_ID else None,
+        "amount": req.bid_amount,
+        "period": req.period,
+        "milestone_percentage": req.milestone_percentage,
+        "description": proposal_text,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                headers=_freelancer_headers(),
+                json=bid_payload,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.json() if e.response.headers.get("content-type", "").startswith("application/json") else {}
+        error_msg = error_body.get("message", str(e))
+        logger.error("Freelancer bid failed for project %s: %s", project_id, error_msg)
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+    await _update_status(req.prospect_id, "applied")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE prospects SET quoted_price = ?, applied_at = ?, bid_id = ? WHERE id = ?",
+            (req.bid_amount, datetime.now(timezone.utc).isoformat(),
+             result.get("result", {}).get("id"), req.prospect_id),
+        )
+        await db.commit()
+
+    bid_id = result.get("result", {}).get("id")
+    logger.info("Freelancer bid submitted: project=%s bid_id=%s amount=$%.2f", project_id, bid_id, req.bid_amount)
+    return {
+        "ok": 1,
+        "bid_id": bid_id,
+        "project_id": project_id,
+        "amount": req.bid_amount,
+        "period": req.period,
+        "proposal_preview": proposal_text[:200],
+    }
+
+
+@app.post("/freelancer/generate-proposal")
+async def generate_proposal_endpoint(prospect_id: str, bid_amount: float = 0, period: int = 7):
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+
+    amount = bid_amount or prospect.get("budget_max", 0) or prospect.get("budget_min", 50)
+    proposal = await _generate_proposal(
+        title=prospect["title"],
+        description=prospect.get("description", ""),
+        skills=prospect.get("skills", ""),
+        bid_amount=amount,
+        period=period,
+    )
+    return {"ok": 1, "proposal": proposal, "bid_amount": amount, "period": period}
+
+
+@app.get("/freelancer/status")
+async def freelancer_status():
+    has_token = bool(FREELANCER_OAUTH_TOKEN)
+    has_user_id = bool(FREELANCER_USER_ID)
+    token_valid = False
+
+    if has_token:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/users/0.1/self/",
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+                user_data = resp.json().get("result", {})
+                token_valid = True
+                return {
+                    "ok": 1,
+                    "configured": True,
+                    "token_valid": True,
+                    "user_id": user_data.get("id"),
+                    "username": user_data.get("username"),
+                    "display_name": user_data.get("display_name"),
+                }
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning("Freelancer token validation failed: %s", e)
+
+    return {
+        "ok": 0 if not has_token else 1,
+        "configured": has_token,
+        "token_valid": token_valid,
+        "has_user_id": has_user_id,
+        "message": "Set FREELANCER_OAUTH_TOKEN and FREELANCER_USER_ID in .env" if not has_token else "Token validation failed",
+    }
+
+
+@app.get("/freelancer/my-bids")
+async def list_freelancer_bids():
+    """Debug: list all bids and their statuses."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                params={"bidders[]": FREELANCER_USER_ID, "limit": 20},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            bids = resp.json().get("result", {}).get("bids", [])
+            return {
+                "ok": 1,
+                "count": len(bids),
+                "bids": [
+                    {
+                        "id": b.get("id"),
+                        "project_id": b.get("project_id"),
+                        "amount": b.get("amount"),
+                        "award_status": b.get("award_status"),
+                        "paid_status": b.get("paid_status"),
+                        "complete_status": b.get("complete_status"),
+                        "frontend_bid_status": b.get("frontend_bid_status"),
+                        "time_awarded": b.get("time_awarded"),
+                    }
+                    for b in bids
+                ],
+            }
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/freelancer/check-awarded")
+async def check_freelancer_awarded():
+    """Poll Freelancer API for bids that have been accepted (awarded)."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+
+    awarded = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                params={
+                    "bidders[]": FREELANCER_USER_ID,
+                    "limit": 50,
+                },
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            bids = resp.json().get("result", {}).get("bids", [])
+
+            for bid in bids:
+                award_status = bid.get("award_status")
+                frontend_status = bid.get("frontend_bid_status", "")
+                if award_status not in ("awarded", "accepted") and frontend_status != "awarded":
+                    continue
+
+                project_id = str(bid.get("project_id", ""))
+                prospect = None
+                async with aiosqlite.connect(DB_PATH) as db:
+                    db.row_factory = aiosqlite.Row
+                    cursor = await db.execute(
+                        "SELECT * FROM prospects WHERE platform = 'freelancer' AND platform_job_id = ?",
+                        (project_id,),
+                    )
+                    row = await cursor.fetchone()
+                    if row:
+                        prospect = dict(row)
+
+                if prospect and prospect["status"] == "applied":
+                    await _update_status(prospect["id"], "hired")
+
+                    thread_id = None
+                    client_username = ""
+                    try:
+                        owner_id = str(bid.get("project_owner_id", ""))
+                        if owner_id:
+                            user_resp = await client.get(
+                                f"{FREELANCER_API_BASE}/users/0.1/users/{owner_id}/",
+                                headers=_freelancer_headers(),
+                            )
+                            if user_resp.status_code == 200:
+                                u = user_resp.json().get("result", {})
+                                client_username = u.get("username") or u.get("public_name") or ""
+
+                        threads_resp = await client.get(
+                            f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                            params={"projects[]": project_id, "limit": 1},
+                            headers=_freelancer_headers(),
+                        )
+                        if threads_resp.status_code == 200:
+                            t_result = threads_resp.json().get("result", {})
+                            t_threads = t_result.get("threads", [])
+                            if not t_threads and isinstance(t_result, dict):
+                                for v in t_result.values():
+                                    if isinstance(v, list) and v:
+                                        t_threads = v
+                                        break
+                            if t_threads:
+                                t = t_threads[0]
+                                thread_id = t.get("id") or (t.get("thread", {}) or {}).get("id")
+                    except Exception as te:
+                        logger.warning("Failed to fetch thread/client for project %s: %s", project_id, te)
+
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE prospects SET hired_at = ?, thread_id = ?, client_username = ? WHERE id = ?",
+                            (datetime.now(timezone.utc).isoformat(), thread_id, client_username, prospect["id"]),
+                        )
+                        await db.commit()
+                    awarded.append({
+                        "prospect_id": prospect["id"],
+                        "project_id": project_id,
+                        "title": prospect["title"],
+                        "bid_amount": bid.get("amount", 0),
+                        "client_username": client_username,
+                    })
+                    logger.info("Freelancer bid AWARDED: project=%s title=%s", project_id, prospect["title"])
+
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer awarded check failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Freelancer API error: {e}")
+
+    return {"ok": 1, "awarded": awarded, "count": len(awarded)}
+
+
+class DeliverRequest(BaseModel):
+    prospect_id: str
+    deliverable: str
+
+
+@app.post("/freelancer/deliver-milestone")
+async def deliver_freelancer_milestone(req: DeliverRequest):
+    """Submit milestone completion on Freelancer for a hired project."""
+    prospect_id = req.prospect_id
+    deliverable = req.deliverable
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=422, detail="Not a Freelancer prospect")
+
+    project_id = prospect["platform_job_id"]
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            ms_resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+                params={"projects[]": project_id, "statuses[]": "created"},
+                headers=_freelancer_headers(),
+            )
+            ms_resp.raise_for_status()
+            milestones = ms_resp.json().get("result", {}).get("milestones", [])
+
+            if not milestones:
+                logger.info("No active milestones for project %s, posting deliverable as message", project_id)
+                await _update_status(prospect_id, "delivered")
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE prospects SET delivered_at = ? WHERE id = ?",
+                        (datetime.now(timezone.utc).isoformat(), prospect_id),
+                    )
+                    await db.commit()
+                return {"ok": 1, "method": "status_update", "message": "Marked as delivered (no milestones found)"}
+
+            milestone = milestones[0]
+            milestone_id = milestone.get("id")
+
+            reason_text = deliverable[:5000] if len(deliverable) <= 5000 else deliverable[:4900] + "\n\n[Full deliverable sent as thread message]"
+            submit_resp = await client.put(
+                f"{FREELANCER_API_BASE}/projects/0.1/milestones/{milestone_id}/",
+                headers=_freelancer_headers(),
+                json={"action": "request_release", "reason": reason_text},
+            )
+            submit_resp.raise_for_status()
+
+            if len(deliverable) > 5000:
+                thread_id = prospect.get("thread_id")
+                if thread_id:
+                    for i in range(0, len(deliverable), 4000):
+                        chunk = deliverable[i:i+4000]
+                        part_label = f"[Part {i//4000 + 1}] " if len(deliverable) > 4000 else ""
+                        await client.post(
+                            f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                            headers=_freelancer_headers(),
+                            json={"message": f"{part_label}{chunk}"},
+                        )
+
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        logger.error("Freelancer milestone delivery failed for %s: %s", project_id, error_msg)
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+    await _update_status(prospect_id, "delivered")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE prospects SET delivered_at = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), prospect_id),
+        )
+        await db.commit()
+
+    logger.info("Freelancer milestone delivered: project=%s milestone=%s", project_id, milestone_id)
+    return {"ok": 1, "method": "milestone_release", "milestone_id": milestone_id}
+
+
+@app.get("/freelancer/check-payments")
+async def check_freelancer_payments():
+    """Check for completed payments on delivered Freelancer projects."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+
+    paid = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM prospects WHERE platform = 'freelancer' AND status = 'delivered'"
+        )
+        delivered = [dict(row) for row in await cursor.fetchall()]
+
+    if not delivered:
+        return {"ok": 1, "paid": [], "count": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for prospect in delivered:
+                project_id = prospect["platform_job_id"]
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+                    params={"projects[]": project_id, "statuses[]": "released"},
+                    headers=_freelancer_headers(),
+                )
+                if resp.status_code == 200:
+                    released = resp.json().get("result", {}).get("milestones", [])
+                    if released:
+                        total_paid = sum(m.get("amount", 0) for m in released)
+                        await _update_status(prospect["id"], "paid")
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE prospects SET paid_at = ?, actual_cost = ? WHERE id = ?",
+                                (datetime.now(timezone.utc).isoformat(), total_paid, prospect["id"]),
+                            )
+                            await db.commit()
+                        paid.append({
+                            "prospect_id": prospect["id"],
+                            "project_id": project_id,
+                            "title": prospect["title"],
+                            "amount_paid": total_paid,
+                        })
+                        logger.info("Payment received: project=%s amount=$%.2f", project_id, total_paid)
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer payment check failed: %s", e)
+
+    return {"ok": 1, "paid": paid, "count": len(paid)}
+
+
+@app.get("/freelancer/messages")
+async def get_freelancer_messages(limit: int = 20, unread_only: bool = True):
+    """Fetch recent message threads from Freelancer messenger."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            params = {
+                "limit": limit,
+                "last_message": "true",
+                "message_context_details": "true",
+                "user_details": "true",
+            }
+            if unread_only:
+                params["is_read"] = "false"
+
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                params=params,
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            threads = data.get("threads", [])
+            users = data.get("users", {})
+
+            messages = []
+            for thread_wrapper in threads:
+                thread_id = thread_wrapper.get("id")
+                inner = thread_wrapper.get("thread") or thread_wrapper
+                context = inner.get("context") or thread_wrapper.get("context") or {}
+                context_type = context.get("type", "")
+                project_id = None
+                if context_type == "project":
+                    project_id = str(context.get("id", ""))
+
+                members = inner.get("members") or thread_wrapper.get("members") or []
+                other_members = [
+                    m for m in members
+                    if str(m) != str(FREELANCER_USER_ID)
+                ]
+                sender_id = other_members[0] if other_members else (members[0] if members else None)
+                sender_name = ""
+                if sender_id:
+                    uid_str = str(sender_id)
+                    if uid_str in users:
+                        u = users[uid_str]
+                        sender_name = u.get("public_name") or u.get("display_name") or u.get("username") or ""
+                    if not sender_name:
+                        owner_id = inner.get("owner")
+                        if owner_id and str(owner_id) in users:
+                            u = users[str(owner_id)]
+                            sender_name = u.get("public_name") or u.get("display_name") or u.get("username") or ""
+                    if not sender_name:
+                        sender_name = f"User#{sender_id}"
+
+                prospect = None
+                if project_id:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        db.row_factory = aiosqlite.Row
+                        cursor = await db.execute(
+                            "SELECT id, title, status, quoted_price FROM prospects WHERE platform = 'freelancer' AND platform_job_id = ?",
+                            (project_id,),
+                        )
+                        row = await cursor.fetchone()
+                        if row:
+                            prospect = dict(row)
+                            if thread_id and not prospect.get("thread_id"):
+                                await db.execute(
+                                    "UPDATE prospects SET thread_id = ?, client_username = ? WHERE id = ?",
+                                    (str(thread_id), sender_name, prospect["id"]),
+                                )
+                                await db.commit()
+
+                last_msg_raw = thread_wrapper.get("last_message") or inner.get("message") or ""
+                if isinstance(last_msg_raw, dict):
+                    last_msg_text = last_msg_raw.get("message", "") or last_msg_raw.get("text", "") or last_msg_raw.get("snippet", "")
+                    last_msg_from = last_msg_raw.get("from_user")
+                else:
+                    last_msg_text = str(last_msg_raw) if last_msg_raw else ""
+                    last_msg_from = None
+
+                messages.append({
+                    "thread_id": thread_id,
+                    "project_id": project_id,
+                    "sender": sender_name,
+                    "sender_id": sender_id,
+                    "message_count": thread_wrapper.get("message_count") or inner.get("message_count") or 0,
+                    "is_read": thread_wrapper.get("is_read", True),
+                    "last_message": last_msg_text,
+                    "last_message_from": last_msg_from,
+                    "last_message_time": thread_wrapper.get("time_updated"),
+                    "context_type": context_type,
+                    "prospect": prospect,
+                })
+
+            return {"ok": 1, "messages": messages, "count": len(messages)}
+
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+@app.get("/freelancer/messages/raw")
+async def get_freelancer_messages_raw(limit: int = 5):
+    """Debug: return raw Freelancer API response for message threads."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/",
+                params={"limit": limit, "message_context_details": "true", "user_details": "true"},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/freelancer/thread/{thread_id}")
+async def get_freelancer_thread(thread_id: int, limit: int = 50):
+    """Fetch messages from a specific Freelancer thread."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                params={"limit": limit},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            messages = data.get("messages", [])
+            if not messages and isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > 0:
+                        messages = v
+                        break
+                    if isinstance(v, dict) and "messages" in v:
+                        messages = v["messages"]
+                        break
+            users = data.get("users", {})
+            for msg in messages:
+                if isinstance(msg, dict):
+                    sender_id = str(msg.get("from_user", msg.get("owner_id", "")))
+                    user_info = users.get(sender_id, {})
+                    msg["_sender_name"] = (
+                        user_info.get("public_name")
+                        or user_info.get("display_name")
+                        or user_info.get("username")
+                        or f"User#{sender_id}"
+                    )
+            return {"ok": 1, "messages": messages, "thread_id": thread_id}
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+@app.get("/freelancer/thread/{thread_id}/raw")
+async def get_freelancer_thread_raw(thread_id: int, limit: int = 50):
+    """Debug: return raw Freelancer API response for thread messages."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+            params={"limit": limit},
+            headers=_freelancer_headers(),
+        )
+        return resp.json()
+
+
+@app.post("/freelancer/thread/{thread_id}/reply")
+async def reply_to_freelancer_thread(thread_id: int, body: dict):
+    """Send a message to a Freelancer thread."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    message_text = body.get("message", "").strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                headers=_freelancer_headers(),
+                json={"message": message_text},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            return {"ok": 1, "thread_id": thread_id, "message_id": data.get("id"), "sent": True}
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
 
 
 if __name__ == "__main__":

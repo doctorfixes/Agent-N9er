@@ -20,14 +20,23 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 PROVIDER_ORDER = ["openrouter", "anthropic", "openai", "azure", "gemini"]
 
+OPENROUTER_ONLY_TIERS = [
+    "deepseek", "deepseek_flash", "deepseek_pro", "deepseek_reasoning",
+    "creative", "open_source", "open_source_large", "mistral", "mistral_large",
+    "gemini_flash", "gemini_pro", "openai_frontier", "openai_mini",
+    "qwen", "minimax", "nvidia", "stepfun", "kimi", "sakana", "zai",
+    "cohere_free", "nvidia_free",
+]
+
 BASE_MODEL_TIERS = {
+    # ── Core tiers (all providers) ──────────────────────────────────
     "budget": {
         "input_cost_per_m": 0.80,
         "output_cost_per_m": 4.00,
         "max_tokens": 8192,
         "label": "Quick tasks, classification, simple Q&A",
         "models": {
-            "openrouter": "anthropic/claude-haiku-4-5-20251001",
+            "openrouter": "anthropic/claude-haiku-4.5",
             "anthropic": "claude-3-5-haiku-latest",
             "openai": "gpt-4o-mini",
             "azure": os.getenv("AZURE_OPENAI_BUDGET_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")),
@@ -40,7 +49,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 16384,
         "label": "Code generation, analysis, writing",
         "models": {
-            "openrouter": "anthropic/claude-sonnet-4-6",
+            "openrouter": "anthropic/claude-sonnet-4.6",
             "anthropic": "claude-sonnet-4-0",
             "openai": "gpt-4.1",
             "azure": os.getenv("AZURE_OPENAI_STANDARD_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")),
@@ -53,25 +62,173 @@ BASE_MODEL_TIERS = {
         "max_tokens": 32768,
         "label": "Complex reasoning, architecture, research",
         "models": {
-            "openrouter": "anthropic/claude-opus-4-8",
+            "openrouter": "anthropic/claude-opus-4.8",
             "anthropic": "claude-opus-4-1",
             "openai": "gpt-5",
             "azure": os.getenv("AZURE_OPENAI_PREMIUM_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5")),
             "gemini": "gemini-2.5-pro",
         },
     },
+    # ── DeepSeek tiers (OpenRouter) ─────────────────────────────────
     "deepseek": {
         "input_cost_per_m": 0.30,
         "output_cost_per_m": 0.90,
         "max_tokens": 8192,
         "label": "High-volume, cost-sensitive tasks",
-        "models": {
-            "openrouter": "deepseek/deepseek-chat-v3-0324",
-            "anthropic": "claude-3-5-haiku-latest",
-            "openai": "gpt-4o-mini",
-            "azure": os.getenv("AZURE_OPENAI_BUDGET_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")),
-            "gemini": "gemini-2.5-flash",
-        },
+        "models": {"openrouter": "deepseek/deepseek-chat-v3.1"},
+    },
+    "deepseek_flash": {
+        "input_cost_per_m": 0.09,
+        "output_cost_per_m": 0.18,
+        "max_tokens": 16384,
+        "label": "Ultra-cheap fast inference (DeepSeek V4 Flash)",
+        "models": {"openrouter": "deepseek/deepseek-v4-flash"},
+    },
+    "deepseek_pro": {
+        "input_cost_per_m": 0.44,
+        "output_cost_per_m": 0.87,
+        "max_tokens": 32768,
+        "label": "Advanced reasoning and coding (DeepSeek V4 Pro)",
+        "models": {"openrouter": "deepseek/deepseek-v4-pro"},
+    },
+    "deepseek_reasoning": {
+        "input_cost_per_m": 0.70,
+        "output_cost_per_m": 2.50,
+        "max_tokens": 16000,
+        "label": "Deep chain-of-thought reasoning (DeepSeek R1)",
+        "models": {"openrouter": "deepseek/deepseek-r1"},
+    },
+    # ── Creative / Fable (OpenRouter) ───────────────────────────────
+    "creative": {
+        "input_cost_per_m": 3.00,
+        "output_cost_per_m": 15.00,
+        "max_tokens": 16384,
+        "label": "Creative writing, narrative, storytelling",
+        "models": {"openrouter": "anthropic/claude-fable-5"},
+    },
+    # ── Open-source models (OpenRouter) ─────────────────────────────
+    "open_source": {
+        "input_cost_per_m": 0.20,
+        "output_cost_per_m": 0.20,
+        "max_tokens": 8192,
+        "label": "Open-weight multimodal (Llama 4 Scout)",
+        "models": {"openrouter": "meta-llama/llama-4-scout"},
+    },
+    "open_source_large": {
+        "input_cost_per_m": 0.50,
+        "output_cost_per_m": 0.70,
+        "max_tokens": 16384,
+        "label": "Open-weight high-capacity (Llama 4 Maverick)",
+        "models": {"openrouter": "meta-llama/llama-4-maverick"},
+    },
+    # ── Mistral models (OpenRouter) ─────────────────────────────────
+    "mistral": {
+        "input_cost_per_m": 0.10,
+        "output_cost_per_m": 0.30,
+        "max_tokens": 8192,
+        "label": "Efficient European AI (Mistral Small 4)",
+        "models": {"openrouter": "mistralai/mistral-small-2603"},
+    },
+    "mistral_large": {
+        "input_cost_per_m": 2.00,
+        "output_cost_per_m": 6.00,
+        "max_tokens": 16384,
+        "label": "Enterprise-grade Mistral (Mistral Medium 3)",
+        "models": {"openrouter": "mistralai/mistral-medium-3"},
+    },
+    # ── Google Gemini via OpenRouter ─────────────────────────────────
+    "gemini_flash": {
+        "input_cost_per_m": 0.10,
+        "output_cost_per_m": 0.40,
+        "max_tokens": 16384,
+        "label": "Fast multimodal (Gemini 3.5 Flash)",
+        "models": {"openrouter": "google/gemini-3.5-flash"},
+    },
+    "gemini_pro": {
+        "input_cost_per_m": 1.25,
+        "output_cost_per_m": 10.00,
+        "max_tokens": 32768,
+        "label": "Frontier reasoning (Gemini 2.5 Pro)",
+        "models": {"openrouter": "google/gemini-2.5-pro"},
+    },
+    # ── OpenAI via OpenRouter ───────────────────────────────────────
+    "openai_frontier": {
+        "input_cost_per_m": 10.00,
+        "output_cost_per_m": 30.00,
+        "max_tokens": 32768,
+        "label": "OpenAI frontier model (GPT-5.4 Pro)",
+        "models": {"openrouter": "openai/gpt-5.4-pro"},
+    },
+    "openai_mini": {
+        "input_cost_per_m": 0.40,
+        "output_cost_per_m": 1.60,
+        "max_tokens": 16384,
+        "label": "OpenAI efficient model (GPT-5.4 Mini)",
+        "models": {"openrouter": "openai/gpt-5.4-mini"},
+    },
+    # ── Specialist models (OpenRouter) ──────────────────────────────
+    "qwen": {
+        "input_cost_per_m": 0.32,
+        "output_cost_per_m": 1.28,
+        "max_tokens": 16384,
+        "label": "Cost-effective multimodal agent (Qwen 3.7 Plus)",
+        "models": {"openrouter": "qwen/qwen3.7-plus"},
+    },
+    "minimax": {
+        "input_cost_per_m": 0.30,
+        "output_cost_per_m": 1.20,
+        "max_tokens": 16384,
+        "label": "Long-horizon agentic work (MiniMax M3)",
+        "models": {"openrouter": "minimax/minimax-m3"},
+    },
+    "nvidia": {
+        "input_cost_per_m": 0.50,
+        "output_cost_per_m": 2.20,
+        "max_tokens": 16384,
+        "label": "Open frontier reasoning (Nemotron 3 Ultra)",
+        "models": {"openrouter": "nvidia/nemotron-3-ultra"},
+    },
+    "stepfun": {
+        "input_cost_per_m": 0.20,
+        "output_cost_per_m": 1.15,
+        "max_tokens": 16384,
+        "label": "High-efficiency multimodal MoE (Step 3.7 Flash)",
+        "models": {"openrouter": "stepfun/step-3.7-flash"},
+    },
+    "kimi": {
+        "input_cost_per_m": 0.74,
+        "output_cost_per_m": 3.50,
+        "max_tokens": 16384,
+        "label": "Long-context coding agent (Kimi K2.7 Code)",
+        "models": {"openrouter": "moonshotai/kimi-k2.7-code"},
+    },
+    "sakana": {
+        "input_cost_per_m": 5.00,
+        "output_cost_per_m": 30.00,
+        "max_tokens": 32768,
+        "label": "Multi-agent orchestration (Fugu Ultra)",
+        "models": {"openrouter": "sakana/fugu-ultra"},
+    },
+    "zai": {
+        "input_cost_per_m": 0.95,
+        "output_cost_per_m": 3.00,
+        "max_tokens": 32768,
+        "label": "Large-scale reasoning agent (GLM 5.2)",
+        "models": {"openrouter": "z-ai/glm-5.2"},
+    },
+    "cohere_free": {
+        "input_cost_per_m": 0.00,
+        "output_cost_per_m": 0.00,
+        "max_tokens": 65536,
+        "label": "Free open-weight coding agent (North Mini Code)",
+        "models": {"openrouter": "cohere/north-mini-code:free"},
+    },
+    "nvidia_free": {
+        "input_cost_per_m": 0.00,
+        "output_cost_per_m": 0.00,
+        "max_tokens": 16384,
+        "label": "Free frontier reasoning (Nemotron 3 Ultra)",
+        "models": {"openrouter": "nvidia/nemotron-3-ultra:free"},
     },
 }
 
@@ -131,9 +288,11 @@ def has_available_provider() -> bool:
 
 def _resolve_tier(tier: str, provider: str | None = None) -> str:
     active_provider = provider or get_active_provider() or "openrouter"
-    if tier == "deepseek" and active_provider != "openrouter":
-        return "budget"
-    return tier if tier in BASE_MODEL_TIERS else "standard"
+    if tier not in BASE_MODEL_TIERS:
+        return "standard"
+    if tier in OPENROUTER_ONLY_TIERS and active_provider != "openrouter":
+        return "budget" if BASE_MODEL_TIERS[tier]["input_cost_per_m"] < 1.0 else "standard"
+    return tier
 
 
 def get_model_tiers(provider: str | None = None) -> dict[str, dict[str, Any]]:
