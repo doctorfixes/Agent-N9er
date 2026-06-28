@@ -62,7 +62,7 @@ function ProposalModal({ prospect, onClose }) {
               {proposal.proposal}
             </div>
             <div style={{ marginTop: 8, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
-              MODE: {proposal.mode?.toUpperCase()} // COST: ${proposal.cost_usd?.toFixed(4) || "0"} // TOKENS: {proposal.tokens || 0}
+              MODE: {proposal.mode?.toUpperCase()}
             </div>
           </div>
         )}

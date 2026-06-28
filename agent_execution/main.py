@@ -455,9 +455,6 @@ async def generate_proposal(req: ProposalRequest):
             "prospect_id": req.prospect_id,
             "proposal": proposal_text,
             "mode": "live",
-            "model": result.model,
-            "cost_usd": result.cost_usd,
-            "tokens": result.input_tokens + result.output_tokens,
         }
     except Exception as e:
         logger.error("Proposal generation failed: %s", e)
@@ -480,9 +477,6 @@ def _simulated_proposal(req: ProposalRequest) -> dict:
         "prospect_id": req.prospect_id,
         "proposal": proposal,
         "mode": "simulation",
-        "model": "none",
-        "cost_usd": 0,
-        "tokens": 0,
     }
 
 
