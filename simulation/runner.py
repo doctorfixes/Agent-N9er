@@ -1,7 +1,7 @@
 import logging
 
-from .task_generator import gen
-from .market import winner
+from task_generator import gen
+from market import winner
 
 logger = logging.getLogger("simulation.runner")
 
