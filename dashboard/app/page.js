@@ -3,7 +3,7 @@
 import { useState, useRef } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => { if (!r.ok) return null; return r.json(); }).catch(() => null);
 
 function Panel({ title, dot, children, actions }) {
   return (
@@ -79,7 +79,9 @@ export default function MissionControl() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ objective }),
       });
-      const data = await resp.json();
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
       setTaskResult(data);
       if (data.status === "completed") {
         addActivity(`Task ${data.task_id?.substring(0, 8)} completed by ${data.winner?.agent_id}`, "success");
