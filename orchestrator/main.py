@@ -327,12 +327,22 @@ async def full_pipeline(task: dict):
                 base_confidence = agent_info.get("confidence", 0.5)
                 specialization = agent_info.get("specialization", "generalist")
                 boost = get_specialization_boost(specialization, category)
-                adjusted_confidence = min(1.0, base_confidence + boost)
+
+                priority = pub_result.get("ranked", {}).get("priority_score", 0)
+                priority_boost = min(0.1, priority / 100)
+
+                adjusted_confidence = min(0.95, base_confidence + boost + priority_boost)
+
+                base_price = agent_info.get("price", 0.1)
+                if adjusted_confidence > 0.8:
+                    price = base_price * 0.9
+                else:
+                    price = base_price
 
                 bid_payload = {
                     "task_id": task_id,
                     "agent_id": agent_id,
-                    "price": agent_info.get("price", 0.1),
+                    "price": round(price, 4),
                     "eta_minutes": agent_info.get("eta_minutes", 5),
                     "confidence": round(adjusted_confidence, 3),
                 }

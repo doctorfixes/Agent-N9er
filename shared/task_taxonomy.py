@@ -382,6 +382,24 @@ AGENT_SPECIALIZATIONS = {
         "confidence_boost": 0.15,
         "secondary_boost": 0.05,
     },
+    "full_stack_freelancer": {
+        "primary": [
+            TaskCategory.CODE_GENERATION,
+            TaskCategory.WORKFLOW_AUTOMATION,
+            TaskCategory.DATA_ANALYSIS,
+            TaskCategory.API_DOCUMENTATION,
+            TaskCategory.UNIT_TEST_GENERATION,
+        ],
+        "secondary": [
+            TaskCategory.CONTENT_GENERATION,
+            TaskCategory.RESEARCH_SYNTHESIS,
+            TaskCategory.DATA_CLEANING,
+            TaskCategory.TASK_EXTRACTION,
+            TaskCategory.COMPLEX_REASONING,
+        ],
+        "confidence_boost": 0.20,
+        "secondary_boost": 0.10,
+    },
     "generalist": {
         "primary": [],
         "secondary": [],

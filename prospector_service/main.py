@@ -1316,8 +1316,19 @@ async def _generate_proposal(title: str, description: str, skills: str, bid_amou
             "I have relevant experience and am ready to start immediately."
         )
 
-    prompt = f"""Write a concise, professional freelancer bid proposal for this project.
-Keep it under 200 words. Be specific to the project requirements. Do not use generic filler.
+    prompt = f"""Write a winning Freelancer.com bid proposal. Your first sentence must reference
+a specific detail from the project description — prove you read it.
+
+STRUCTURE:
+1. HOOK: Name the client's specific problem (1 sentence, NOT "I am" or "I have").
+2. APPROACH: What you'll deliver and how (2-3 sentences, name specific technologies).
+3. TIMELINE: "{period} days" — state what they get at each milestone if period > 7.
+4. CLOSE: One clear call to action.
+
+RULES:
+- Under 150 words. Shorter wins on Freelancer.com.
+- No generic phrases: "extensive experience", "high-quality", "passionate about".
+- No pricing discussion — the bid amount speaks for itself.
 
 Project Title: {title}
 Description: {description}
@@ -1325,7 +1336,7 @@ Required Skills: {skills}
 Bid Amount: ${bid_amount:.2f}
 Delivery: {period} days
 
-Write ONLY the proposal text, no headers or meta-commentary."""
+Write ONLY the proposal text."""
 
     resp = await complete(
         messages=[{"role": "user", "content": prompt}],
