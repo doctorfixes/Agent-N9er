@@ -39,7 +39,7 @@ PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
-FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "true").lower() == "true"
+FREELANCER_AUTO_BID = os.getenv("FREELANCER_AUTO_BID", "false").lower() == "true"
 FREELANCER_MAX_BIDS_PER_MONTH = int(os.getenv("FREELANCER_MAX_BIDS_PER_MONTH", "45"))
 FREELANCER_MAX_BIDS_PER_HOUR = int(os.getenv("FREELANCER_MAX_BIDS_PER_HOUR", "5"))
 FREELANCER_MIN_BUDGET = float(os.getenv("FREELANCER_MIN_BUDGET", "50"))
@@ -261,6 +261,16 @@ async def _auto_evaluate_and_bid(svc=None):
             for p in applied_resp.json():
                 if p.get("applied_at", "") >= month_start:
                     bids_this_month += 1
+        for extra_status in ["hired", "executing", "delivered", "paid"]:
+            extra_resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": extra_status, "platform": "freelancer", "limit": 200},
+                headers=svc,
+            )
+            if extra_resp.status_code == 200:
+                for p in extra_resp.json():
+                    if p.get("applied_at", "") >= month_start:
+                        bids_this_month += 1
 
         remaining = FREELANCER_MAX_BIDS_PER_MONTH - bids_this_month
         if remaining <= 0:
@@ -1594,13 +1604,13 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                     prospect_result["estimated_cost"] = cost
                     prospect_result["complexity"] = evaluation.get("complexity", "")
 
-                    # 2b. Auto-bid on Freelancer prospects
+                    # 2b. Auto-bid on Freelancer prospects (skip — handled by _auto_evaluate_and_bid with limit checks)
                     rv_budget_min = prospect.get("budget_min", 0) or 0
                     rv_budget_max = prospect.get("budget_max", 0) or 0
                     bid_amount = max(quoted, rv_budget_min, 15.0)
                     if rv_budget_max > 0:
                         bid_amount = min(bid_amount, rv_budget_max)
-                    if prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and bid_amount > 0:
+                    if False and prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and bid_amount > 0:
                         try:
                             proposal_text = ""
                             try:
