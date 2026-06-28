@@ -10,7 +10,6 @@ RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public 2>/dev/null ;true
 RUN chown -R app:app /app
 USER app
 EXPOSE 3000
