@@ -1568,9 +1568,16 @@ async def check_freelancer_awarded():
     return {"ok": 1, "awarded": awarded, "count": len(awarded)}
 
 
+class DeliverRequest(BaseModel):
+    prospect_id: str
+    deliverable: str
+
+
 @app.post("/freelancer/deliver-milestone")
-async def deliver_freelancer_milestone(prospect_id: str, deliverable: str):
+async def deliver_freelancer_milestone(req: DeliverRequest):
     """Submit milestone completion on Freelancer for a hired project."""
+    prospect_id = req.prospect_id
+    deliverable = req.deliverable
     if not FREELANCER_OAUTH_TOKEN:
         raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
 

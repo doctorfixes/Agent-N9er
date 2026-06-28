@@ -483,7 +483,7 @@ async def _check_awarded_and_execute(svc=None):
                             try:
                                 await client.post(
                                     f"{PROSPECTOR_URL}/freelancer/deliver-milestone",
-                                    params={"prospect_id": pid, "deliverable": deliverable[:5000]},
+                                    json={"prospect_id": pid, "deliverable": deliverable[:5000]},
                                     headers=svc,
                                 )
                             except Exception as de:
