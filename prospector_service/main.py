@@ -1830,7 +1830,27 @@ async def get_freelancer_thread(thread_id: int, limit: int = 50):
             )
             resp.raise_for_status()
             data = resp.json().get("result", {})
-            return {"ok": 1, "messages": data.get("messages", []), "thread_id": thread_id}
+            messages = data.get("messages", [])
+            if not messages and isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > 0:
+                        messages = v
+                        break
+                    if isinstance(v, dict) and "messages" in v:
+                        messages = v["messages"]
+                        break
+            users = data.get("users", {})
+            for msg in messages:
+                if isinstance(msg, dict):
+                    sender_id = str(msg.get("from_user", msg.get("owner_id", "")))
+                    user_info = users.get(sender_id, {})
+                    msg["_sender_name"] = (
+                        user_info.get("public_name")
+                        or user_info.get("display_name")
+                        or user_info.get("username")
+                        or f"User#{sender_id}"
+                    )
+            return {"ok": 1, "messages": messages, "thread_id": thread_id}
     except httpx.HTTPStatusError as e:
         error_msg = str(e)
         try:
@@ -1840,6 +1860,20 @@ async def get_freelancer_thread(thread_id: int, limit: int = 50):
         raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+@app.get("/freelancer/thread/{thread_id}/raw")
+async def get_freelancer_thread_raw(thread_id: int, limit: int = 50):
+    """Debug: return raw Freelancer API response for thread messages."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+            params={"limit": limit},
+            headers=_freelancer_headers(),
+        )
+        return resp.json()
 
 
 @app.post("/freelancer/thread/{thread_id}/reply")

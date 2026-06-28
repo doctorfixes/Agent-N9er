@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
 
 const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
@@ -95,7 +95,7 @@ function ThreadModal({ msg, onClose }) {
     setLoading(false);
   };
 
-  useState(() => { loadThread(); }, []);
+  useEffect(() => { loadThread(); }, []);
 
   const sendReply = async () => {
     if (!replyText.trim()) return;
