@@ -1472,6 +1472,41 @@ async def freelancer_status():
     }
 
 
+@app.get("/freelancer/my-bids")
+async def list_freelancer_bids():
+    """Debug: list all bids and their statuses."""
+    if not FREELANCER_OAUTH_TOKEN or not FREELANCER_USER_ID:
+        raise HTTPException(status_code=503, detail="Freelancer credentials not configured")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                params={"bidders[]": FREELANCER_USER_ID, "limit": 20},
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+            bids = resp.json().get("result", {}).get("bids", [])
+            return {
+                "ok": 1,
+                "count": len(bids),
+                "bids": [
+                    {
+                        "id": b.get("id"),
+                        "project_id": b.get("project_id"),
+                        "amount": b.get("amount"),
+                        "award_status": b.get("award_status"),
+                        "paid_status": b.get("paid_status"),
+                        "complete_status": b.get("complete_status"),
+                        "frontend_bid_status": b.get("frontend_bid_status"),
+                        "time_awarded": b.get("time_awarded"),
+                    }
+                    for b in bids
+                ],
+            }
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @app.get("/freelancer/check-awarded")
 async def check_freelancer_awarded():
     """Poll Freelancer API for bids that have been accepted (awarded)."""
