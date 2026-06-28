@@ -101,6 +101,23 @@ NON_VIABLE_SIGNALS = [
     "native speaker required", "certified professional",
 ]
 
+UNDELIVERABLE_SIGNALS = [
+    "lead generation", "lead gen", "lead list", "sales navigator",
+    "linkedin scraping", "linkedin leads", "email scraping",
+    "data scraping", "web scraping", "prospect list",
+    "verified emails", "email harvest", "contact list",
+    "b2b leads", "b2b list", "mailing list", "cold email list",
+    "virtual assistant", "admin assistant", "personal assistant",
+    "data entry", "manual data", "copy paste",
+    "video editing", "video production", "motion graphics",
+    "graphic design", "logo design", "photoshop", "illustrator",
+    "3d modeling", "3d rendering", "cad design",
+    "translation", "transcription", "voice over", "voiceover",
+    "social media management", "social media posting",
+    "seo backlinks", "link building", "guest posting",
+    "phone calls", "appointment setting", "telemarketing",
+]
+
 SCAM_SIGNALS = [
     "send money", "wire transfer", "western union", "crypto payment upfront",
     "personal bank", "social security", "ssn", "credit card number",
@@ -116,6 +133,9 @@ def check_viability(title: str, description: str) -> str | None:
     for signal in NON_VIABLE_SIGNALS:
         if signal in text:
             return f"Task requires non-digital capability: {signal}"
+    for signal in UNDELIVERABLE_SIGNALS:
+        if signal in text:
+            return f"Task requires external tools/access AI cannot provide: {signal}"
     return None
 
 

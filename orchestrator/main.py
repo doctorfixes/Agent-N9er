@@ -301,6 +301,29 @@ async def _auto_evaluate_and_bid(svc=None):
             vague_titles = ["i need", "help me", "do this", "project", "work"]
             if title.strip() in vague_titles:
                 return False
+
+            undeliverable_signals = [
+                "lead generation", "lead gen", "lead list", "sales navigator",
+                "linkedin scraping", "linkedin leads", "email scraping",
+                "data scraping", "web scraping", "screen scraping",
+                "cold calling", "cold email list", "prospect list",
+                "verified emails", "email harvest", "contact list",
+                "b2b leads", "b2b list", "mailing list",
+                "virtual assistant", "admin assistant", "personal assistant",
+                "data entry", "manual data", "copy paste",
+                "video editing", "video production", "motion graphics",
+                "graphic design", "logo design", "photoshop", "illustrator",
+                "3d modeling", "3d rendering", "cad design",
+                "translation", "transcription", "voice over", "voiceover",
+                "social media management", "social media posting",
+                "seo backlinks", "link building", "guest posting",
+                "phone calls", "appointment setting", "telemarketing",
+            ]
+            combined = f"{title} {desc}"
+            for signal in undeliverable_signals:
+                if signal in combined:
+                    return False
+
             return True
 
         candidates = [p for p in all_prospects if not p.get("applied_at")]
