@@ -19,6 +19,7 @@ logger = logging.getLogger("evaluator")
 
 DB_PATH = os.getenv("EVALUATOR_DB_PATH", "/data/evaluator.db")
 MINIMUM_QUOTE_USD = float(os.getenv("MINIMUM_QUOTE_USD", "5.00"))
+PLATFORM_FEE_RATE = float(os.getenv("PLATFORM_FEE_RATE", "0.10"))
 
 COMPLEXITY_SIGNALS = {
     "expert": ["architecture", "system design", "distributed", "migration", "security audit",
@@ -72,6 +73,8 @@ class EvaluationResult(BaseModel):
     quoted_price_usd: float
     markup_multiplier: float
     estimated_profit_usd: float
+    platform_fee_usd: float = 0.0
+    platform_fee_rate: float = 0.10
     ai_advantage_score: float = 0.5
     profit_efficiency: float = 0.0
     rejection_reason: str | None = None
@@ -126,10 +129,11 @@ def compute_ai_advantage(title: str, description: str, skills: list[str]) -> flo
     return min(1.0, advantage_hits / max(total, 1))
 
 
-def compute_profit_efficiency(quoted: float, cost: float, budget_max: float) -> float:
+def compute_profit_efficiency(quoted: float, cost: float, budget_max: float, platform_fee_rate: float = 0.10) -> float:
     if quoted <= 0:
         return 0.0
-    margin = (quoted - cost) / quoted
+    net_revenue = quoted * (1 - platform_fee_rate)
+    margin = (net_revenue - cost) / quoted
     budget_fit = 1.0
     if budget_max > 0:
         budget_fit = min(1.0, quoted / budget_max) if quoted <= budget_max else max(0.0, 1.0 - (quoted - budget_max) / quoted)
@@ -226,8 +230,9 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
         rejection = f"Token cost ${cost_est.estimated_cost_usd:.2f} alone exceeds budget ${req.budget_max:.2f}"
         viable = False
 
-    profit = quoted - cost_est.estimated_cost_usd if viable else 0
-    prof_efficiency = compute_profit_efficiency(quoted, cost_est.estimated_cost_usd, req.budget_max) if viable else 0
+    platform_fee = quoted * PLATFORM_FEE_RATE if viable else 0
+    profit = quoted - cost_est.estimated_cost_usd - platform_fee if viable else 0
+    prof_efficiency = compute_profit_efficiency(quoted, cost_est.estimated_cost_usd, req.budget_max, PLATFORM_FEE_RATE) if viable else 0
 
     result = EvaluationResult(
         evaluation_id=evaluation_id, viable=viable, complexity=complexity,
@@ -238,6 +243,8 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
         quoted_price_usd=quoted if viable else 0,
         markup_multiplier=MARKUP_MULTIPLIER,
         estimated_profit_usd=round(profit, 4),
+        platform_fee_usd=round(platform_fee, 4),
+        platform_fee_rate=PLATFORM_FEE_RATE,
         ai_advantage_score=round(ai_advantage, 3),
         profit_efficiency=prof_efficiency,
         rejection_reason=rejection,
@@ -279,6 +286,7 @@ async def pricing():
     return {
         "markup_multiplier": MARKUP_MULTIPLIER,
         "minimum_quote_usd": MINIMUM_QUOTE_USD,
+        "platform_fee_rate": PLATFORM_FEE_RATE,
         "model_tiers": {k: {"model": v["model"], "label": v["label"],
                             "input_cost_per_m": v["input_cost_per_m"],
                             "output_cost_per_m": v["output_cost_per_m"]}
