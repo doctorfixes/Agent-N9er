@@ -24,6 +24,7 @@ from shared.config import (
     CORS_ORIGINS,
 )
 from shared.retry import retry_post
+from shared.llm import complete as llm_complete
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -46,6 +47,7 @@ FREELANCER_MAX_BUDGET = float(os.getenv("FREELANCER_MAX_BUDGET", "15000"))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "true").lower() == "true"
 
 
 async def telegram_notify(message: str):
@@ -532,7 +534,7 @@ async def _check_awarded_and_execute(svc=None):
 
 
 async def _check_freelancer_messages(svc=None):
-    """Poll Freelancer messenger for unread messages and notify via Telegram."""
+    """Poll Freelancer messenger for unread messages, auto-reply when appropriate."""
     if svc is None:
         svc = _svc_headers()
 
@@ -556,14 +558,21 @@ async def _check_freelancer_messages(svc=None):
                 sender = msg.get("sender", "Unknown")
                 preview = (msg.get("last_message", "") or "")[:200]
                 project_id = msg.get("project_id", "")
+                thread_id = msg.get("thread_id")
                 prospect = msg.get("prospect")
 
                 project_info = ""
+                status = ""
+                title = ""
+                quoted_price = 0
                 if prospect:
+                    title = prospect.get("title", "Unknown")
+                    status = prospect.get("status", "unknown")
+                    quoted_price = prospect.get("quoted_price", 0)
                     project_info = (
-                        f"Project: {prospect.get('title', 'Unknown')}\n"
-                        f"Status: {prospect.get('status', 'unknown')}\n"
-                        f"Bid: ${prospect.get('quoted_price', 0)}\n"
+                        f"Project: {title}\n"
+                        f"Status: {status}\n"
+                        f"Bid: ${quoted_price}\n"
                     )
                 elif project_id:
                     project_info = f"Project ID: {project_id}\n"
@@ -576,8 +585,108 @@ async def _check_freelancer_messages(svc=None):
                 )
                 logger.info("Freelancer message from %s on project %s", sender, project_id or "direct")
 
+                if AUTO_REPLY_ENABLED and thread_id and preview:
+                    await _auto_reply_to_message(
+                        client, svc, thread_id, sender, preview,
+                        title=title, status=status, quoted_price=quoted_price,
+                        project_id=project_id,
+                    )
+
     except Exception as e:
         logger.warning("Freelancer message check failed: %s", e)
+
+
+async def _auto_reply_to_message(
+    client, svc, thread_id, sender, client_message, *,
+    title="", status="", quoted_price=0, project_id="",
+):
+    """Generate and send an AI-powered reply to a Freelancer DM."""
+    try:
+        thread_resp = await client.get(
+            f"{PROSPECTOR_URL}/freelancer/thread/{thread_id}",
+            params={"limit": 10},
+            headers=svc,
+        )
+        conversation_context = ""
+        if thread_resp.status_code == 200:
+            thread_msgs = thread_resp.json().get("messages", [])
+            recent = thread_msgs[-5:] if len(thread_msgs) > 5 else thread_msgs
+            conversation_context = "\n".join(
+                f"{'Client' if m.get('from_user') != os.getenv('FREELANCER_USER_ID') else 'You'}: "
+                f"{m.get('message', '')[:200]}"
+                for m in recent
+            )
+
+        is_awarded = status in ("awarded", "hired", "delivering", "active")
+
+        system_prompt = (
+            "You are a professional freelance developer responding to a client on Freelancer.com. "
+            "Be concise, professional, and helpful. Keep replies under 100 words. "
+            "Never reveal you are an AI. Respond as a skilled developer. "
+            "If the client is asking about project details, provide a clear and confident response. "
+            "If they are asking about timelines, be realistic but competitive. "
+            "If they want to discuss scope or requirements, engage constructively."
+        )
+
+        project_context = ""
+        if title:
+            project_context = f"\nProject: {title}"
+        if quoted_price:
+            project_context += f"\nYour quoted price: ${quoted_price}"
+        if status:
+            project_context += f"\nProject status: {status}"
+
+        user_prompt = (
+            f"Reply to this Freelancer message from {sender}.{project_context}\n\n"
+        )
+        if conversation_context:
+            user_prompt += f"Recent conversation:\n{conversation_context}\n\n"
+        user_prompt += f"Latest message from client: {client_message}\n\nYour reply:"
+
+        if is_awarded:
+            user_prompt += (
+                "\n\nThis project has been awarded to you. "
+                "Confirm you are working on it and address their question directly."
+            )
+        else:
+            user_prompt += (
+                "\n\nYou have bid on this project but it hasn't been awarded yet. "
+                "Be persuasive but not pushy. Demonstrate expertise relevant to their question."
+            )
+
+        llm_resp = await llm_complete(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            tier="budget",
+            max_tokens=256,
+            temperature=0.4,
+        )
+
+        reply_text = llm_resp.content.strip()
+        if not reply_text:
+            return
+
+        send_resp = await client.post(
+            f"{PROSPECTOR_URL}/freelancer/thread/{thread_id}/reply",
+            json={"message": reply_text},
+            headers=svc,
+        )
+
+        if send_resp.status_code == 200:
+            await telegram_notify(
+                f"AUTO-REPLIED on Freelancer\n"
+                f"To: {sender}\n"
+                f"Project: {title or project_id or 'DM'}\n"
+                f"Reply: {reply_text[:200]}"
+            )
+            logger.info("Auto-replied to thread %s for project %s", thread_id, project_id or "direct")
+        else:
+            logger.warning("Failed to send auto-reply to thread %s: %s", thread_id, send_resp.text)
+
+    except Exception as e:
+        logger.warning("Auto-reply failed for thread %s: %s", thread_id, e)
 
 
 @asynccontextmanager

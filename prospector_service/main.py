@@ -1804,6 +1804,37 @@ async def get_freelancer_thread(thread_id: int, limit: int = 50):
         raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
 
 
+@app.post("/freelancer/thread/{thread_id}/reply")
+async def reply_to_freelancer_thread(thread_id: int, body: dict):
+    """Send a message to a Freelancer thread."""
+    if not FREELANCER_OAUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="FREELANCER_OAUTH_TOKEN not configured")
+
+    message_text = body.get("message", "").strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/messages/0.1/threads/{thread_id}/messages/",
+                headers=_freelancer_headers(),
+                json={"message": message_text},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {})
+            return {"ok": 1, "thread_id": thread_id, "message_id": data.get("id"), "sent": True}
+    except httpx.HTTPStatusError as e:
+        error_msg = str(e)
+        try:
+            error_msg = e.response.json().get("message", error_msg)
+        except Exception:
+            pass
+        raise HTTPException(status_code=e.response.status_code, detail=f"Freelancer API error: {error_msg}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8900)
