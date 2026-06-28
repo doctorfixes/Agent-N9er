@@ -234,8 +234,11 @@ async def _auto_evaluate_and_bid(svc=None):
 
                 evaluation = eval_data.get("evaluation", {})
                 quoted = evaluation.get("quoted_price_usd", 0)
-                if quoted <= 0:
-                    continue
+                budget_min = prospect.get("budget_min", 0) or 0
+                budget_max = prospect.get("budget_max", 0) or 0
+                bid_amount = max(quoted, budget_min, 15.0)
+                if budget_max > 0:
+                    bid_amount = min(bid_amount, budget_max)
 
                 proposal_text = ""
                 try:
@@ -246,7 +249,7 @@ async def _auto_evaluate_and_bid(svc=None):
                             "description": prospect.get("description", ""),
                             "skills": prospect.get("skills", ""),
                             "platform": "freelancer",
-                            "budget_max": prospect.get("budget_max", 0),
+                            "budget_max": budget_max,
                         },
                         headers=svc,
                         timeout=30.0,
@@ -262,7 +265,7 @@ async def _auto_evaluate_and_bid(svc=None):
                     f"{PROSPECTOR_URL}/freelancer/bid",
                     json={
                         "prospect_id": pid,
-                        "bid_amount": quoted,
+                        "bid_amount": bid_amount,
                         "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
                         "milestone_percentage": 100.0,
                         "description": proposal_text,
@@ -272,11 +275,11 @@ async def _auto_evaluate_and_bid(svc=None):
                 if bid_resp.status_code == 200:
                     bid_data = bid_resp.json()
                     bids_placed += 1
-                    logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], quoted)
+                    logger.info("Auto-bid on Freelancer project %s: $%.2f", pid[:8], bid_amount)
                     await telegram_notify(
                         f"BID PLACED\n"
                         f"Project: {prospect.get('title', 'Unknown')}\n"
-                        f"Amount: ${quoted:.2f}\n"
+                        f"Amount: ${bid_amount:.2f}\n"
                         f"Bid ID: {bid_data.get('bid_id')}\n"
                         f"URL: {prospect.get('url', '')}"
                     )
@@ -615,7 +618,12 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                     prospect_result["complexity"] = evaluation.get("complexity", "")
 
                     # 2b. Auto-bid on Freelancer prospects
-                    if prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and quoted > 0:
+                    rv_budget_min = prospect.get("budget_min", 0) or 0
+                    rv_budget_max = prospect.get("budget_max", 0) or 0
+                    bid_amount = max(quoted, rv_budget_min, 15.0)
+                    if rv_budget_max > 0:
+                        bid_amount = min(bid_amount, rv_budget_max)
+                    if prospect["platform"] == "freelancer" and FREELANCER_AUTO_BID and bid_amount > 0:
                         try:
                             proposal_text = ""
                             try:
@@ -642,7 +650,7 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 f"{PROSPECTOR_URL}/freelancer/bid",
                                 json={
                                     "prospect_id": pid,
-                                    "bid_amount": quoted,
+                                    "bid_amount": bid_amount,
                                     "period": 7 if evaluation.get("complexity") in ("simple", "trivial", "moderate") else 14,
                                     "milestone_percentage": 100.0,
                                     "description": proposal_text,
@@ -657,7 +665,7 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
                                 await telegram_notify(
                                     f"BID PLACED\n"
                                     f"Project: {prospect.get('title', 'Unknown')}\n"
-                                    f"Amount: ${quoted:.2f}\n"
+                                    f"Amount: ${bid_amount:.2f}\n"
                                     f"Bid ID: {bid_data.get('bid_id')}\n"
                                     f"URL: {prospect.get('url', '')}"
                                 )
