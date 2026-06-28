@@ -1,23 +1,14 @@
-const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || "http://localhost:9000";
-const SERVICE_TOKEN = process.env.SERVICE_TOKEN || "";
+import { proxyFetch, svcHeaders } from "../_proxy";
 
-function headers() {
-  const h = { "Content-Type": "application/json" };
-  if (SERVICE_TOKEN) h["X-Service-Token"] = SERVICE_TOKEN;
-  return h;
-}
+const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || "http://localhost:9000";
 
 export async function GET() {
-  const resp = await fetch(`${ORCHESTRATOR_URL}/scan/status`, { headers: headers() });
-  const data = await resp.json();
-  return Response.json(data, { status: resp.status });
+  return proxyFetch(`${ORCHESTRATOR_URL}/scan/status`, { headers: svcHeaders() });
 }
 
 export async function POST() {
-  const resp = await fetch(`${ORCHESTRATOR_URL}/scan/trigger`, {
+  return proxyFetch(`${ORCHESTRATOR_URL}/scan/trigger`, {
     method: "POST",
-    headers: headers(),
+    headers: svcHeaders(),
   });
-  const data = await resp.json();
-  return Response.json(data, { status: resp.status });
 }
