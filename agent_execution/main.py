@@ -421,7 +421,7 @@ async def generate_proposal(req: ProposalRequest):
                 "PROPOSAL STRUCTURE (adapt, don't follow rigidly):\n"
                 "1. HOOK (1-2 sentences): Name the client's specific problem. Do NOT open with 'I am' or 'I have'.\n"
                 "2. APPROACH (2-4 sentences): What you'll build/deliver and how. Be concrete — name technologies, patterns, deliverables.\n"
-                "3. TIMELINE: Give a specific delivery estimate in days.\n"
+                "3. TIMELINE: Give an aggressive but realistic delivery estimate. Most projects: 3-7 days. Complex MVPs: 10-14 days max. Never exceed 2 weeks.\n"
                 "4. CLOSE (1 sentence): Clear next step.\n\n"
                 "RULES:\n"
                 "- Under 200 words. Shorter wins.\n"
