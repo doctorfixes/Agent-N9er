@@ -407,7 +407,7 @@ async def generate_proposal(req: ProposalRequest):
                 "4) A clear call to action. "
                 "Keep it under 300 words. Do NOT include pricing — that's handled separately. "
                 "Do NOT use placeholder brackets like [Client Name], [X], or [Your Name]. "
-                "Address the client directly as 'you'. Sign off as 'Agent N9er'."
+                "Address the client directly as 'you'. Sign off as 'RJ'."
             ),
         },
         {
@@ -446,7 +446,7 @@ async def generate_proposal(req: ProposalRequest):
 def _clean_proposal(text: str) -> str:
     text = re.sub(r"Dear \[.*?\],?\n?", "", text)
     text = re.sub(r"\[Client(?:\s+Name)?\]", "you", text)
-    text = re.sub(r"\[Your Name\]", "Agent N9er", text)
+    text = re.sub(r"\[Your Name\]", "RJ", text)
     text = re.sub(r"\[X\]", "5-7", text)
     text = re.sub(r"\[.*?\]", "", text)
     return text.strip()
