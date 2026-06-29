@@ -54,6 +54,11 @@ SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,
 AUTO_SCAN_ENABLED = os.getenv("AUTO_SCAN_ENABLED", "false").lower() == "true"
 SCAN_RATE_DELAY = int(os.getenv("SCAN_RATE_DELAY_SECONDS", "5"))
 
+AUTONOMOUS_MODE = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
+AUTONOMOUS_INTERVAL = int(os.getenv("AUTONOMOUS_INTERVAL_SECONDS", "300"))
+AUTO_APPLY_ENABLED = os.getenv("AUTO_APPLY_ENABLED", "true").lower() == "true"
+MAX_PARALLEL_TASKS = int(os.getenv("MAX_PARALLEL_TASKS", "5"))
+
 app = FastAPI(title="Agent N9er Orchestrator")
 
 app.add_middleware(RequestIDMiddleware)
@@ -148,6 +153,257 @@ async def _scan_loop():
             await asyncio.sleep(60)
 
 
+_autonomous_task: asyncio.Task | None = None
+_autonomous_state = {
+    "running": False,
+    "cycles_completed": 0,
+    "last_cycle_at": None,
+    "prospects_applied": 0,
+    "prospects_executed": 0,
+    "total_revenue_generated": 0.0,
+}
+
+
+async def _autonomous_loop():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await _run_autonomous_cycle()
+            await asyncio.sleep(AUTONOMOUS_INTERVAL)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Autonomous loop error: %s", e)
+            await asyncio.sleep(60)
+
+
+async def _run_autonomous_cycle():
+    _autonomous_state["running"] = True
+    svc = _svc_headers()
+    cycle_stats = {"scanned": 0, "evaluated": 0, "applied": 0, "executed": 0, "invoiced": 0}
+
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        # Phase 1: Scan all platforms in parallel
+        scan_tasks = []
+        for platform in SCAN_PLATFORMS:
+            scan_tasks.append(_scan_platform(client, platform, svc))
+        scan_results = await asyncio.gather(*scan_tasks, return_exceptions=True)
+        for r in scan_results:
+            if isinstance(r, dict):
+                cycle_stats["scanned"] += r.get("new", 0)
+
+        # Phase 2: Evaluate all discovered prospects in parallel
+        try:
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "discovered", "limit": MAX_PARALLEL_TASKS * 2},
+                headers=svc,
+            )
+            resp.raise_for_status()
+            discovered = resp.json()
+
+            if discovered:
+                eval_tasks = [
+                    _evaluate_prospect(client, p["id"], svc)
+                    for p in discovered[:MAX_PARALLEL_TASKS]
+                ]
+                eval_results = await asyncio.gather(*eval_tasks, return_exceptions=True)
+                cycle_stats["evaluated"] = sum(
+                    1 for r in eval_results if isinstance(r, dict) and r.get("ok")
+                )
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning("Autonomous evaluate phase failed: %s", e)
+
+        # Phase 3: Auto-apply to all approved prospects in parallel
+        if AUTO_APPLY_ENABLED:
+            try:
+                resp = await client.get(
+                    f"{PROSPECTOR_URL}/prospects",
+                    params={"status": "approved", "limit": MAX_PARALLEL_TASKS},
+                    headers=svc,
+                )
+                resp.raise_for_status()
+                approved = resp.json()
+
+                if approved:
+                    apply_tasks = [
+                        _auto_apply_prospect(client, p, svc)
+                        for p in approved[:MAX_PARALLEL_TASKS]
+                    ]
+                    apply_results = await asyncio.gather(*apply_tasks, return_exceptions=True)
+                    cycle_stats["applied"] = sum(
+                        1 for r in apply_results if isinstance(r, dict) and r.get("ok")
+                    )
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.warning("Autonomous apply phase failed: %s", e)
+
+        # Phase 4: Execute work for hired prospects in parallel
+        try:
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "hired", "limit": MAX_PARALLEL_TASKS},
+                headers=svc,
+            )
+            resp.raise_for_status()
+            hired = resp.json()
+
+            if hired:
+                exec_tasks = [
+                    _execute_prospect(client, p, svc)
+                    for p in hired[:MAX_PARALLEL_TASKS]
+                ]
+                exec_results = await asyncio.gather(*exec_tasks, return_exceptions=True)
+                for r in exec_results:
+                    if isinstance(r, dict) and r.get("ok"):
+                        cycle_stats["executed"] += 1
+                        cycle_stats["invoiced"] += 1 if r.get("invoiced") else 0
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning("Autonomous execute phase failed: %s", e)
+
+    _autonomous_state["running"] = False
+    _autonomous_state["cycles_completed"] += 1
+    _autonomous_state["last_cycle_at"] = datetime.now(timezone.utc).isoformat()
+    _autonomous_state["prospects_applied"] += cycle_stats["applied"]
+    _autonomous_state["prospects_executed"] += cycle_stats["executed"]
+
+    await emit(EVENT_SCAN_COMPLETED, {
+        "autonomous": True, **cycle_stats,
+    }, relay=False)
+
+    logger.info(
+        "Autonomous cycle #%d: scanned=%d evaluated=%d applied=%d executed=%d invoiced=%d",
+        _autonomous_state["cycles_completed"],
+        cycle_stats["scanned"], cycle_stats["evaluated"], cycle_stats["applied"],
+        cycle_stats["executed"], cycle_stats["invoiced"],
+    )
+    return cycle_stats
+
+
+async def _scan_platform(client: httpx.AsyncClient, platform: str, svc: dict) -> dict:
+    try:
+        resp = await client.post(
+            f"{PROSPECTOR_URL}/scan",
+            json={"platform": platform, "max_results": 20},
+            headers=svc,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Scan failed for %s: %s", platform, e)
+        return {"error": str(e)}
+
+
+async def _evaluate_prospect(client: httpx.AsyncClient, prospect_id: str, svc: dict) -> dict:
+    try:
+        resp = await client.post(
+            f"{PROSPECTOR_URL}/prospects/{prospect_id}/evaluate",
+            headers=svc,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Evaluate failed for %s: %s", prospect_id[:8], e)
+        return {"error": str(e)}
+
+
+async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict) -> dict:
+    pid = prospect["id"]
+    try:
+        proposal_resp = await client.post(
+            f"{EXECUTION_URL}/proposal",
+            json={
+                "prospect_id": pid,
+                "title": prospect.get("title", ""),
+                "description": prospect.get("description", ""),
+                "platform": prospect.get("platform", "unknown"),
+                "budget_max": prospect.get("budget_max", 0) or prospect.get("quoted_price", 0),
+                "skills": prospect.get("skills", ""),
+                "tone": "professional",
+            },
+            headers=svc,
+        )
+        proposal_resp.raise_for_status()
+        proposal_data = proposal_resp.json()
+
+        await client.patch(
+            f"{PROSPECTOR_URL}/prospects/{pid}",
+            json={"status": "applied"},
+            headers=svc,
+        )
+
+        logger.info("Auto-applied to prospect %s: %s [%s]",
+                     pid[:8], prospect.get("title", "?")[:50], proposal_data.get("mode"))
+        return {"ok": 1, "prospect_id": pid, "proposal_mode": proposal_data.get("mode")}
+
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Auto-apply failed for %s: %s", pid[:8], e)
+        return {"error": str(e)}
+
+
+async def _execute_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict) -> dict:
+    pid = prospect["id"]
+    try:
+        await client.patch(
+            f"{PROSPECTOR_URL}/prospects/{pid}",
+            json={"status": "executing"},
+            headers=svc,
+        )
+
+        exec_resp = await client.post(
+            f"{EXECUTION_URL}/execute",
+            json={
+                "task_id": pid,
+                "agent_id": "agent-n9er-primary",
+                "confidence": 0.85,
+                "objective": prospect.get("title", ""),
+                "description": prospect.get("description", ""),
+            },
+            headers=svc,
+        )
+        exec_resp.raise_for_status()
+        exec_data = exec_resp.json()
+
+        invoiced = False
+        if exec_data.get("success"):
+            await client.patch(
+                f"{PROSPECTOR_URL}/prospects/{pid}",
+                json={"status": "delivered"},
+                headers=svc,
+            )
+
+            quoted = prospect.get("quoted_price", 0) or prospect.get("budget_max", 0)
+            if quoted > 0:
+                try:
+                    await client.post(
+                        f"{BILLING_URL}/invoices",
+                        json={
+                            "prospect_id": pid,
+                            "client_email": prospect.get("client_email", ""),
+                            "description": prospect.get("title", ""),
+                            "amount_usd": quoted,
+                            "token_cost_usd": exec_data.get("cost_usd", 0),
+                            "platform": prospect.get("platform", ""),
+                        },
+                        headers=svc,
+                    )
+                    invoiced = True
+                except (httpx.RequestError, httpx.HTTPStatusError):
+                    logger.warning("Invoice creation failed for %s", pid[:8])
+
+            return {"ok": 1, "prospect_id": pid, "invoiced": invoiced}
+        else:
+            await client.patch(
+                f"{PROSPECTOR_URL}/prospects/{pid}",
+                json={"status": "approved"},
+                headers=svc,
+            )
+            return {"ok": 0, "prospect_id": pid, "reason": "execution_failed"}
+
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Execute failed for %s: %s", pid[:8], e)
+        return {"error": str(e)}
+
+
 async def _run_scan_cycle():
     _scan_state["running"] = True
     svc = _svc_headers()
@@ -183,19 +439,24 @@ async def _run_scan_cycle():
 
 @asynccontextmanager
 async def lifespan(app):
-    global _scan_task
+    global _scan_task, _autonomous_task
     await _init_db()
     await _load_agents()
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
         logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
+    if AUTONOMOUS_MODE:
+        _autonomous_task = asyncio.create_task(_autonomous_loop())
+        logger.info("Autonomous mode enabled: interval=%ds, parallel=%d, auto_apply=%s",
+                     AUTONOMOUS_INTERVAL, MAX_PARALLEL_TASKS, AUTO_APPLY_ENABLED)
     yield
-    if _scan_task:
-        _scan_task.cancel()
-        try:
-            await _scan_task
-        except asyncio.CancelledError:
-            pass
+    for task in [_scan_task, _autonomous_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def _svc_headers(request=None):
@@ -728,13 +989,56 @@ async def _on_reputation_change(data: dict):
 
 @_on_event(EVENT_SCAN_COMPLETED)
 async def _on_scan_completed(data: dict):
-    """When a scan finds approved prospects, log the momentum signal.
-    More successful executions → better reputation → more aggressive
-    scanning makes economic sense."""
     approved = data.get("approved", 0)
     if approved > 0:
         _pipeline_stats["auto_rescans_triggered"] += 1
         logger.info("Scan momentum: %d approved prospects ready for pipeline", approved)
+
+
+@_on_event(EVENT_PROSPECT_APPROVED)
+async def _on_prospect_approved(data: dict):
+    """When a prospect is approved, auto-generate a proposal and apply.
+    This closes the gap between evaluation and action."""
+    if not AUTO_APPLY_ENABLED:
+        return
+    prospect_id = data.get("prospect_id")
+    if not prospect_id:
+        return
+
+    svc = _svc_headers()
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+        try:
+            resp = await client.get(f"{PROSPECTOR_URL}/prospects/{prospect_id}", headers=svc)
+            resp.raise_for_status()
+            prospect = resp.json()
+            result = await _auto_apply_prospect(client, prospect, svc)
+            if result.get("ok"):
+                _pipeline_stats["feedback_loops_triggered"] += 1
+        except Exception as e:
+            logger.warning("Auto-apply on event failed for %s: %s", prospect_id[:8], e)
+
+
+# ---------------------------------------------------------------------------
+# Autonomous mode control endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/autonomous/status")
+async def autonomous_status():
+    return {
+        "enabled": AUTONOMOUS_MODE,
+        "interval_seconds": AUTONOMOUS_INTERVAL,
+        "auto_apply_enabled": AUTO_APPLY_ENABLED,
+        "max_parallel_tasks": MAX_PARALLEL_TASKS,
+        **_autonomous_state,
+    }
+
+
+@app.post("/autonomous/trigger")
+async def trigger_autonomous_cycle():
+    if _autonomous_state["running"]:
+        return {"ok": 0, "detail": "Cycle already in progress"}
+    stats = await _run_autonomous_cycle()
+    return {"ok": 1, "cycle_stats": stats, "state": _autonomous_state}
 
 
 @app.get("/pipeline/momentum")
@@ -756,5 +1060,6 @@ async def pipeline_momentum():
         "feedback_loops_triggered": _pipeline_stats["feedback_loops_triggered"],
         "confidence_recalibrations": _pipeline_stats["confidence_recalibrations"],
         "auto_rescans_triggered": _pipeline_stats["auto_rescans_triggered"],
+        "autonomous": _autonomous_state,
         "recent_events": get_recent_events(limit=10),
     }

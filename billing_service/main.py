@@ -333,6 +333,34 @@ async def revenue_summary():
     }
 
 
+@app.get("/profitability")
+async def profitability_by_platform():
+    """Returns profit margins by platform so ranking can prioritize
+    the most profitable types of work."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT platform, COUNT(*) as jobs, "
+            "COALESCE(SUM(amount_usd), 0) as revenue, "
+            "COALESCE(SUM(token_cost_usd), 0) as cost, "
+            "COALESCE(SUM(profit_usd), 0) as profit, "
+            "COALESCE(AVG(profit_usd), 0) as avg_profit "
+            "FROM invoices GROUP BY platform ORDER BY profit DESC"
+        )
+        rows = await cursor.fetchall()
+        platforms = {}
+        for r in rows:
+            revenue = r[2]
+            platforms[r[0]] = {
+                "jobs": r[1],
+                "revenue_usd": round(revenue, 2),
+                "cost_usd": round(r[3], 4),
+                "profit_usd": round(r[4], 2),
+                "avg_profit_usd": round(r[5], 2),
+                "margin_pct": round((r[4] / revenue * 100) if revenue > 0 else 0, 1),
+            }
+        return platforms
+
+
 async def _log_event(db, invoice_id: str, event: str, amount: float):
     await db.execute(
         "INSERT INTO revenue_log (id, invoice_id, event, amount_usd) VALUES (?, ?, ?, ?)",

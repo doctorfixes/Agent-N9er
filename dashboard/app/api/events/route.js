@@ -16,6 +16,7 @@ export async function GET(request) {
     stats: `${ORCHESTRATOR_URL}/events/stats`,
     subscriptions: `${ORCHESTRATOR_URL}/events/subscriptions`,
     momentum: `${ORCHESTRATOR_URL}/pipeline/momentum`,
+    autonomous: `${ORCHESTRATOR_URL}/autonomous/status`,
   };
 
   const url = urls[endpoint];

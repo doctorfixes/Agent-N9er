@@ -1,7 +1,9 @@
 import os
 import sys
+import asyncio
 import logging
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,6 +17,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger("ranking")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
+
+_profitability_cache: dict = {}
+_cache_expires_at: float = 0
 
 
 app = FastAPI(title="Agent N9er Ranking Engine")
@@ -45,6 +51,23 @@ async def health():
     return {"ok": 1, "service": "ranking"}
 
 
+async def _get_profitability() -> dict:
+    import time
+    global _profitability_cache, _cache_expires_at
+    now = time.time()
+    if _profitability_cache and now < _cache_expires_at:
+        return _profitability_cache
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{BILLING_URL}/profitability")
+            resp.raise_for_status()
+            _profitability_cache = resp.json()
+            _cache_expires_at = now + 300
+    except Exception as e:
+        logger.debug("Profitability fetch failed (using cache): %s", e)
+    return _profitability_cache
+
+
 @app.post("/rank")
 async def rank(task: dict):
     if "id" not in task:
@@ -63,15 +86,38 @@ async def rank(task: dict):
     tier = task.get("tier", "")
     tier_boost = {"highest_leverage": 3.0, "high_roi": 2.0, "operational": 1.0, "creative_technical": 0.5}.get(tier, 0)
 
-    priority_score = round(base_score + keyword_boost + value_boost + tier_boost, 2)
+    # Profitability boost: platforms with higher historical margins get priority
+    profit_boost = 0.0
+    platform = task.get("platform", task.get("source", ""))
+    if platform:
+        profitability = await _get_profitability()
+        platform_data = profitability.get(platform, {})
+        avg_profit = platform_data.get("avg_profit_usd", 0)
+        margin = platform_data.get("margin_pct", 0)
+        if avg_profit > 0:
+            profit_boost = min(avg_profit * 0.05, 5.0)
+        if margin > 80:
+            profit_boost += 2.0
+        elif margin > 50:
+            profit_boost += 1.0
 
-    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f) category=%s",
+    # Budget signal: tasks with known budgets get a boost proportional to value
+    budget = task.get("budget_max", 0)
+    budget_boost = 0.0
+    if budget > 0:
+        budget_boost = min(budget * 0.01, 5.0)
+
+    priority_score = round(base_score + keyword_boost + value_boost + tier_boost + profit_boost + budget_boost, 2)
+
+    logger.info("Ranked task %s: score=%.2f (base=%.1f kw=%.1f val=%.1f tier=%.1f profit=%.1f budget=%.1f) category=%s",
                 task["id"], priority_score, base_score, keyword_boost, value_boost, tier_boost,
-                task.get("category", "unknown"))
+                profit_boost, budget_boost, task.get("category", "unknown"))
     return {
         "id": task["id"],
         "priority_score": priority_score,
         "category": task.get("category"),
         "tier": tier,
         "value_score": round(value_boost, 2),
+        "profit_boost": round(profit_boost, 2),
+        "budget_boost": round(budget_boost, 2),
     }
