@@ -2136,3 +2136,148 @@ class TestGetByPlatformId:
     async def test_not_found(self, client):
         result = await prospector._get_by_platform_id("freelancer", "nonexistent")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Post-hire pipeline tests
+# ---------------------------------------------------------------------------
+
+class TestCheckAwards:
+    async def test_no_credentials(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = ""
+        prospector.FREELANCER_ID = ""
+        try:
+            resp = await client.post("/prospects/check-awards")
+            data = resp.json()
+            assert data["checked"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+    async def test_no_applied_prospects(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            resp = await client.post("/prospects/check-awards")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["checked"] == 0
+            assert data["hired"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+    async def test_award_detected(self, client):
+        await prospector._save_prospect({
+            "id": "award1", "platform": "freelancer", "platform_job_id": "fl-999",
+            "title": "Award Me", "description": "", "budget_min": 0,
+            "budget_max": 500, "status": "discovered",
+        })
+        await prospector._update_status("award1", "applied")
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"result": {"bids": [{"award_status": "awarded"}], "milestones": []}}
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/check-awards")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["hired"] == 1
+
+            prospect = await prospector._get_prospect("award1")
+            assert prospect["status"] == "hired"
+            assert prospect["hired_at"] is not None
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+
+class TestCheckPayments:
+    async def test_no_delivered_prospects(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            resp = await client.post("/prospects/check-payments")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["checked"] == 0
+            assert data["paid"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+
+class TestCheckReviews:
+    async def test_no_paid_prospects(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            resp = await client.post("/prospects/check-reviews")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["checked"] == 0
+            assert data["rated"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+
+class TestMilestones:
+    async def test_get_milestones_empty(self, client):
+        await prospector._save_prospect({
+            "id": "ms1", "platform": "freelancer", "platform_job_id": "fl-ms1",
+            "title": "Milestone Test", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "hired",
+        })
+        resp = await client.get("/prospects/ms1/milestones")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+class TestSubmitDeliverable:
+    async def test_prospect_not_found(self, client):
+        resp = await client.post("/prospects/nonexistent/submit-deliverable")
+        assert resp.status_code == 404
+
+    async def test_non_freelancer_rejected(self, client):
+        await prospector._save_prospect({
+            "id": "sd1", "platform": "upwork", "platform_job_id": "up-1",
+            "title": "Upwork Job", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "delivered",
+        })
+        resp = await client.post("/prospects/sd1/submit-deliverable")
+        assert resp.status_code == 400
+
+    async def test_no_token(self, client):
+        await prospector._save_prospect({
+            "id": "sd2", "platform": "freelancer", "platform_job_id": "fl-sd2",
+            "title": "Freelancer Job", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "delivered",
+        })
+        original_token = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = ""
+        try:
+            resp = await client.post("/prospects/sd2/submit-deliverable")
+            assert resp.status_code == 503
+        finally:
+            prospector.FREELANCER_TOKEN = original_token

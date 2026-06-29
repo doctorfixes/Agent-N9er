@@ -1045,3 +1045,180 @@ async def test_self_awareness_degraded(client):
     assert data["health"]["status"] == "degraded"
     assert len(data["issues"]) > 0
     assert any("execution" in r.lower() for r in data["recommendations"])
+
+
+# --- Post-hire pipeline tests ---
+
+async def test_posthire_endpoint(client):
+    """POST /posthire triggers post-hire cycle and returns stats."""
+    awards_resp = _make_response({"ok": 1, "checked": 2, "hired": 1, "rejected": 0, "details": []})
+    hired_resp = _make_response([])
+    payments_resp = _make_response({"ok": 1, "checked": 0, "paid": 0})
+    reviews_resp = _make_response({"ok": 1, "checked": 0, "rated": 0})
+
+    async def mock_post(url, **kwargs):
+        if "check-awards" in url:
+            return awards_resp
+        elif "check-payments" in url:
+            return payments_resp
+        elif "check-reviews" in url:
+            return reviews_resp
+        return _make_response({})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return hired_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with _mock_service_up(), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/posthire")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert "posthire" in data
+    assert data["posthire"]["awards_checked"] == 2
+    assert data["posthire"]["newly_hired"] == 1
+
+
+async def test_posthire_status_endpoint(client):
+    """GET /posthire/status returns config and last run stats."""
+    resp = await client.get("/posthire/status")
+    data = resp.json()
+    assert "auto_execute_on_hire" in data
+    assert "auto_submit_deliverable" in data
+
+
+async def test_posthire_auto_execute(client):
+    """Post-hire cycle auto-executes hired prospects when enabled."""
+    awards_resp = _make_response({"ok": 1, "checked": 0, "hired": 0, "details": []})
+    hired_prospects = [{"id": "h1", "title": "Hired work", "description": "do something", "status": "hired"}]
+    exec_result = _make_response({"ok": 1, "success": True, "mode": "real", "cost_usd": 0.002})
+    payments_resp = _make_response({"ok": 1, "checked": 0, "paid": 0})
+    reviews_resp = _make_response({"ok": 1, "checked": 0, "rated": 0})
+
+    patch_calls = []
+
+    async def mock_post(url, **kwargs):
+        if "check-awards" in url:
+            return awards_resp
+        elif "execute" in url:
+            return exec_result
+        elif "check-payments" in url:
+            return payments_resp
+        elif "check-reviews" in url:
+            return reviews_resp
+        return _make_response({})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return _make_response(hired_prospects)
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        patch_calls.append({"url": url, "json": kwargs.get("json", {})})
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with _mock_service_up(), \
+            patch.object(orch, "AUTO_EXECUTE_ON_HIRE", True), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/posthire")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["posthire"]["executed"] == 1
+    status_transitions = [c["json"].get("status") for c in patch_calls]
+    assert "executing" in status_transitions
+    assert "delivered" in status_transitions
+
+
+async def test_posthire_rollback_on_exec_failure(client):
+    """Post-hire cycle rolls back to 'hired' when execution fails."""
+    awards_resp = _make_response({"ok": 1, "checked": 0, "hired": 0, "details": []})
+    hired_prospects = [{"id": "h2", "title": "Will fail", "description": "fail", "status": "hired"}]
+    exec_result = _make_response({"ok": 1, "success": False, "mode": "simulation"})
+    payments_resp = _make_response({"ok": 1, "checked": 0, "paid": 0})
+    reviews_resp = _make_response({"ok": 1, "checked": 0, "rated": 0})
+
+    patch_calls = []
+
+    async def mock_post(url, **kwargs):
+        if "check-awards" in url:
+            return awards_resp
+        elif "execute" in url:
+            return exec_result
+        elif "check-payments" in url:
+            return payments_resp
+        elif "check-reviews" in url:
+            return reviews_resp
+        return _make_response({})
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return _make_response(hired_prospects)
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        patch_calls.append(kwargs.get("json", {}))
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with _mock_service_up(), \
+            patch.object(orch, "AUTO_EXECUTE_ON_HIRE", True), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/posthire")
+
+    data = resp.json()
+    assert data["posthire"]["executed"] == 0
+    last_status = patch_calls[-1].get("status")
+    assert last_status == "hired"
+
+
+async def test_posthire_skips_execution_when_service_down(client):
+    """Post-hire cycle skips auto-execution when execution service is down."""
+    health = {"execution": {"up": False}, "prospector": {"up": True}, "reputation": {"up": True}}
+    awards_resp = _make_response({"ok": 1, "checked": 0, "hired": 0, "details": []})
+    payments_resp = _make_response({"ok": 1, "checked": 0, "paid": 0})
+    reviews_resp = _make_response({"ok": 1, "checked": 0, "rated": 0})
+
+    async def mock_post(url, **kwargs):
+        if "check-awards" in url:
+            return awards_resp
+        elif "check-payments" in url:
+            return payments_resp
+        elif "check-reviews" in url:
+            return reviews_resp
+        return _make_response({})
+
+    mock_client = AsyncMock()
+    mock_client.post = mock_post
+    mock_client.get = AsyncMock(return_value=_make_response([]))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch, "_service_health", health), \
+            patch.object(orch, "AUTO_EXECUTE_ON_HIRE", True), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/posthire")
+
+    data = resp.json()
+    assert data["posthire"]["executed"] == 0

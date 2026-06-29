@@ -245,6 +245,20 @@ async def _init_db():
             CREATE INDEX IF NOT EXISTS idx_prospect_platform
             ON prospects (platform, created_at DESC)
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS milestones (
+                id TEXT PRIMARY KEY,
+                prospect_id TEXT NOT NULL,
+                platform_milestone_id TEXT,
+                description TEXT,
+                amount_usd REAL DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                submitted_at TIMESTAMP,
+                paid_at TIMESTAMP,
+                FOREIGN KEY (prospect_id) REFERENCES prospects(id)
+            )
+        """)
         await db.commit()
 
 
@@ -1518,6 +1532,288 @@ async def _save_prospect(p: dict):
              p["budget_min"], p["budget_max"], p.get("skills", ""), p["status"], p.get("url", "")),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Post-hire pipeline
+# ---------------------------------------------------------------------------
+
+def _freelancer_headers():
+    return {
+        "Freelancer-OAuth-V1": FREELANCER_TOKEN,
+        "Content-Type": "application/json",
+    }
+
+
+@app.post("/prospects/check-awards")
+async def check_awards():
+    """Poll Freelancer API for awarded bids. Transitions applied → hired."""
+    if not FREELANCER_TOKEN or not FREELANCER_ID:
+        return {"ok": 0, "detail": "Freelancer credentials not configured", "checked": 0, "hired": 0, "rejected": 0}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM prospects WHERE status = 'applied' AND platform = 'freelancer' AND platform_job_id IS NOT NULL"
+        )
+        applied = [dict(r) for r in await cursor.fetchall()]
+
+    if not applied:
+        return {"ok": 1, "checked": 0, "hired": 0, "rejected": 0}
+
+    stats = {"checked": 0, "hired": 0, "rejected": 0, "errors": 0, "details": []}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for prospect in applied:
+            project_id = prospect["platform_job_id"]
+            try:
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+                    params={"bidders[]": FREELANCER_ID, "project_ids[]": project_id},
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                bids = data.get("result", {}).get("bids", [])
+                stats["checked"] += 1
+
+                for bid in bids:
+                    award_status = bid.get("award_status", "pending")
+                    if award_status in ("awarded", "accepted"):
+                        await _update_status(prospect["id"], "hired")
+                        await _sync_milestones(client, prospect["id"], project_id)
+                        stats["hired"] += 1
+                        stats["details"].append({"prospect_id": prospect["id"], "title": prospect["title"], "transition": "hired"})
+                        logger.info("Bid awarded: %s (project %s)", prospect["title"][:40], project_id)
+                    elif award_status in ("rejected", "revoked"):
+                        await _update_status(prospect["id"], "rejected")
+                        stats["rejected"] += 1
+                        stats["details"].append({"prospect_id": prospect["id"], "title": prospect["title"], "transition": "rejected"})
+
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Award check failed for project %s: %s", project_id, e)
+
+    logger.info("Award check: checked=%d hired=%d rejected=%d", stats["checked"], stats["hired"], stats["rejected"])
+    return {"ok": 1, **stats}
+
+
+async def _sync_milestones(client: httpx.AsyncClient, prospect_id: str, project_id: str):
+    """Fetch milestones from Freelancer API and store them."""
+    try:
+        resp = await client.get(
+            f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+            params={"project_ids[]": project_id, "bidder_ids[]": FREELANCER_ID},
+            headers=_freelancer_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        milestones = data.get("result", {}).get("milestones", [])
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            for ms in milestones:
+                ms_id = str(uuid.uuid4())[:8]
+                await db.execute(
+                    "INSERT OR IGNORE INTO milestones (id, prospect_id, platform_milestone_id, description, amount_usd, status) VALUES (?, ?, ?, ?, ?, ?)",
+                    (ms_id, prospect_id, str(ms.get("id", "")),
+                     ms.get("description", "Milestone"),
+                     ms.get("amount", 0),
+                     "active" if ms.get("status") == "Created" else "pending"),
+                )
+            await db.commit()
+        logger.info("Synced %d milestones for prospect %s", len(milestones), prospect_id[:8])
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Milestone sync failed for project %s: %s", project_id, e)
+
+
+@app.get("/prospects/{prospect_id}/milestones")
+async def get_milestones(prospect_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM milestones WHERE prospect_id = ? ORDER BY created_at", (prospect_id,)
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+@app.post("/prospects/check-payments")
+async def check_payments():
+    """Poll Freelancer API for milestone releases. Transitions delivered → paid."""
+    if not FREELANCER_TOKEN or not FREELANCER_ID:
+        return {"ok": 0, "detail": "Freelancer credentials not configured", "checked": 0, "paid": 0}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM prospects WHERE status = 'delivered' AND platform = 'freelancer' AND platform_job_id IS NOT NULL"
+        )
+        delivered = [dict(r) for r in await cursor.fetchall()]
+
+    if not delivered:
+        return {"ok": 1, "checked": 0, "paid": 0}
+
+    stats = {"checked": 0, "paid": 0, "total_earned": 0, "errors": 0}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for prospect in delivered:
+            project_id = prospect["platform_job_id"]
+            try:
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/projects/0.1/milestones/",
+                    params={"project_ids[]": project_id},
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                milestones = data.get("result", {}).get("milestones", [])
+                stats["checked"] += 1
+
+                all_released = len(milestones) > 0
+                total_paid = 0
+                for ms in milestones:
+                    if ms.get("status") in ("Released", "Cleared"):
+                        total_paid += ms.get("amount", 0)
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE milestones SET status = 'paid', paid_at = ? WHERE platform_milestone_id = ?",
+                                (datetime.utcnow().isoformat(), str(ms.get("id", ""))),
+                            )
+                            await db.commit()
+                    else:
+                        all_released = False
+
+                if all_released and total_paid > 0:
+                    platform_fee = round(total_paid * 0.10, 2)
+                    net = round(total_paid - platform_fee, 2)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE prospects SET actual_cost = ?, status = 'paid', paid_at = ? WHERE id = ?",
+                            (net, datetime.utcnow().isoformat(), prospect["id"]),
+                        )
+                        await db.commit()
+                    stats["paid"] += 1
+                    stats["total_earned"] += net
+                    logger.info("Payment received: %s — $%.2f (net $%.2f)", prospect["title"][:40], total_paid, net)
+
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Payment check failed for project %s: %s", project_id, e)
+
+    return {"ok": 1, **stats}
+
+
+@app.post("/prospects/check-reviews")
+async def check_reviews():
+    """Poll Freelancer API for reviews on paid projects. Transitions paid → rated."""
+    if not FREELANCER_TOKEN or not FREELANCER_ID:
+        return {"ok": 0, "detail": "Freelancer credentials not configured", "checked": 0, "rated": 0}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM prospects WHERE status = 'paid' AND platform = 'freelancer'"
+        )
+        paid = [dict(r) for r in await cursor.fetchall()]
+
+    if not paid:
+        return {"ok": 1, "checked": 0, "rated": 0}
+
+    stats = {"checked": 0, "rated": 0, "errors": 0}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for prospect in paid:
+            try:
+                resp = await client.get(
+                    f"{FREELANCER_API_BASE}/projects/0.1/reviews/",
+                    params={"project_ids[]": prospect["platform_job_id"], "to_users[]": FREELANCER_ID},
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                reviews = data.get("result", {}).get("reviews", [])
+                stats["checked"] += 1
+
+                if reviews:
+                    review = reviews[0]
+                    rating = review.get("rating", 0)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE prospects SET rating = ?, status = 'rated' WHERE id = ?",
+                            (rating, prospect["id"]),
+                        )
+                        await db.commit()
+                    stats["rated"] += 1
+                    logger.info("Review received: %s — %.1f stars", prospect["title"][:40], rating)
+
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Review check failed for %s: %s", prospect["id"][:8], e)
+
+    return {"ok": 1, **stats}
+
+
+@app.post("/prospects/{prospect_id}/submit-deliverable")
+async def submit_deliverable(prospect_id: str):
+    """Submit completed work to the client via Freelancer API."""
+    prospect = await _get_prospect(prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    if prospect["platform"] != "freelancer":
+        raise HTTPException(status_code=400, detail="Only Freelancer deliverable submission is supported")
+    if not FREELANCER_TOKEN:
+        raise HTTPException(status_code=503, detail="Freelancer token not configured")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM milestones WHERE prospect_id = ? AND status = 'active' ORDER BY created_at LIMIT 1",
+            (prospect_id,),
+        )
+        milestone = await cursor.fetchone()
+
+    project_id = prospect["platform_job_id"]
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        if milestone:
+            try:
+                resp = await client.put(
+                    f"{FREELANCER_API_BASE}/projects/0.1/milestones/{milestone['platform_milestone_id']}/",
+                    json={"action": "request_release"},
+                    headers=_freelancer_headers(),
+                )
+                resp.raise_for_status()
+
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE milestones SET status = 'submitted', submitted_at = ? WHERE id = ?",
+                        (datetime.utcnow().isoformat(), milestone["id"]),
+                    )
+                    await db.commit()
+
+                logger.info("Milestone release requested: %s", prospect["title"][:40])
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.warning("Milestone submission failed: %s", e)
+                return {"ok": 0, "error": str(e)}
+
+        try:
+            resp = await client.post(
+                f"{FREELANCER_API_BASE}/projects/0.1/threads/",
+                json={
+                    "thread_type": "private",
+                    "context_type": "project",
+                    "context_id": int(project_id),
+                    "members[]": [],
+                    "message": f"I've completed the work for \"{prospect['title']}\". "
+                               "Please review the deliverable and release the milestone when satisfied. "
+                               "Let me know if you need any revisions.",
+                },
+                headers=_freelancer_headers(),
+            )
+            resp.raise_for_status()
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning("Client message failed: %s", e)
+
+    return {"ok": 1, "prospect_id": prospect_id, "milestone_submitted": milestone is not None}
 
 
 if __name__ == "__main__":

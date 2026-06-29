@@ -170,6 +170,8 @@ async def _auto_unstick(client: httpx.AsyncClient, svc: dict) -> int:
 
         reset = 0
         for prospect in stuck:
+            if prospect.get("hired_at"):
+                continue
             try:
                 await client.patch(
                     f"{PROSPECTOR_URL}/prospects/{prospect['id']}",
@@ -221,6 +223,8 @@ async def _persist_agent(agent_data: dict):
 
 AUTO_DISPATCH_ENABLED = os.getenv("AUTO_DISPATCH_ENABLED", "false").lower() == "true"
 DISPATCH_RATE_DELAY = int(os.getenv("DISPATCH_RATE_DELAY_SECONDS", "3"))
+AUTO_EXECUTE_ON_HIRE = os.getenv("AUTO_EXECUTE_ON_HIRE", "true").lower() == "true"
+AUTO_SUBMIT_DELIVERABLE = os.getenv("AUTO_SUBMIT_DELIVERABLE", "false").lower() == "true"
 
 
 async def _scan_loop():
@@ -268,6 +272,9 @@ async def _scan_loop():
                         "Post-scan dispatch deferred until services recover",
                         severity="warn", outcome="skipped",
                     )
+
+            if _is_service_up("prospector"):
+                await _posthire_cycle()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -450,6 +457,154 @@ async def _dispatch_cycle():
     return stats
 
 
+async def _posthire_cycle():
+    """Post-hire lifecycle: check awards, auto-execute hired work, check payments, check reviews."""
+    svc = _svc_headers()
+    stats = {"awards_checked": 0, "newly_hired": 0, "executed": 0, "payments": 0, "reviews": 0, "errors": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+            # 1. Check for awarded bids (applied → hired)
+            try:
+                resp = await client.post(f"{PROSPECTOR_URL}/prospects/check-awards", headers=svc)
+                resp.raise_for_status()
+                awards = resp.json()
+                stats["awards_checked"] = awards.get("checked", 0)
+                stats["newly_hired"] = awards.get("hired", 0)
+
+                if stats["newly_hired"] > 0:
+                    await _journal(
+                        "bids_awarded", f"{stats['newly_hired']} bids awarded",
+                        f"Checked {stats['awards_checked']} applied bids, {stats['newly_hired']} hired",
+                        awards.get("details", []), outcome="ok",
+                    )
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Award check failed: %s", e)
+
+            # 2. Auto-execute work for hired prospects
+            if AUTO_EXECUTE_ON_HIRE and _is_service_up("execution"):
+                try:
+                    hired_resp = await client.get(
+                        f"{PROSPECTOR_URL}/prospects",
+                        params={"status": "hired", "limit": 10},
+                        headers=svc,
+                    )
+                    hired_resp.raise_for_status()
+                    hired = hired_resp.json()
+
+                    for prospect in hired:
+                        pid = prospect["id"]
+                        try:
+                            await client.patch(
+                                f"{PROSPECTOR_URL}/prospects/{pid}",
+                                json={"status": "executing"},
+                                headers=svc,
+                            )
+
+                            exec_resp = await client.post(
+                                f"{EXECUTION_URL}/execute",
+                                json={
+                                    "task_id": pid,
+                                    "agent_id": "agent-n9er-primary",
+                                    "confidence": 0.85,
+                                    "objective": prospect["title"],
+                                    "description": prospect.get("description", ""),
+                                    "complexity": "moderate",
+                                },
+                                headers=svc,
+                            )
+                            exec_resp.raise_for_status()
+                            exec_data = exec_resp.json()
+
+                            if exec_data.get("success"):
+                                await client.patch(
+                                    f"{PROSPECTOR_URL}/prospects/{pid}",
+                                    json={"status": "delivered"},
+                                    headers=svc,
+                                )
+                                stats["executed"] += 1
+
+                                if AUTO_SUBMIT_DELIVERABLE:
+                                    try:
+                                        await client.post(
+                                            f"{PROSPECTOR_URL}/prospects/{pid}/submit-deliverable",
+                                            headers=svc,
+                                        )
+                                    except (httpx.RequestError, httpx.HTTPStatusError):
+                                        pass
+
+                                await _journal(
+                                    "work_completed", f"Delivered: {prospect['title'][:60]}",
+                                    f"Mode: {exec_data.get('mode', '?')}, Cost: ${exec_data.get('cost_usd', 0):.4f}",
+                                    {"prospect_id": pid, "mode": exec_data.get("mode"), "cost": exec_data.get("cost_usd", 0)},
+                                    outcome="ok",
+                                )
+                            else:
+                                await client.patch(
+                                    f"{PROSPECTOR_URL}/prospects/{pid}",
+                                    json={"status": "hired"},
+                                    headers=svc,
+                                )
+                        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                            stats["errors"] += 1
+                            try:
+                                await client.patch(
+                                    f"{PROSPECTOR_URL}/prospects/{pid}",
+                                    json={"status": "hired"},
+                                    headers=svc,
+                                )
+                            except httpx.RequestError:
+                                pass
+                            logger.warning("Execution failed for hired prospect %s: %s", pid[:8], e)
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    stats["errors"] += 1
+                    logger.warning("Hired prospect fetch failed: %s", e)
+
+            # 3. Check for payments (delivered → paid)
+            try:
+                resp = await client.post(f"{PROSPECTOR_URL}/prospects/check-payments", headers=svc)
+                resp.raise_for_status()
+                payments = resp.json()
+                stats["payments"] = payments.get("paid", 0)
+
+                if stats["payments"] > 0:
+                    await _journal(
+                        "payments_received", f"{stats['payments']} payments received",
+                        f"Total earned: ${payments.get('total_earned', 0):.2f}",
+                        outcome="ok",
+                    )
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Payment check failed: %s", e)
+
+            # 4. Check for reviews (paid → rated)
+            try:
+                resp = await client.post(f"{PROSPECTOR_URL}/prospects/check-reviews", headers=svc)
+                resp.raise_for_status()
+                reviews = resp.json()
+                stats["reviews"] = reviews.get("rated", 0)
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                stats["errors"] += 1
+                logger.warning("Review check failed: %s", e)
+
+    except Exception as e:
+        stats["errors"] += 1
+        await _journal("posthire_error", "Post-hire cycle failed",
+                       str(e), severity="error", outcome="error")
+
+    if any(stats[k] > 0 for k in ("newly_hired", "executed", "payments", "reviews")):
+        await _journal(
+            "posthire_complete",
+            f"Post-hire: {stats['newly_hired']} hired, {stats['executed']} executed, {stats['payments']} paid",
+            f"Awards checked: {stats['awards_checked']}, Reviews: {stats['reviews']}",
+            stats, outcome="ok" if stats["errors"] == 0 else "partial",
+        )
+
+    _scan_state["last_posthire"] = stats
+    return stats
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _scan_task
@@ -574,6 +729,22 @@ async def dispatch_status():
         "auto_scan_enabled": AUTO_SCAN_ENABLED,
         "last_dispatch": _scan_state.get("last_dispatch"),
         **_scan_state,
+    }
+
+
+@app.post("/posthire")
+async def trigger_posthire():
+    """Manually trigger post-hire cycle: check awards, execute hired work, check payments."""
+    stats = await _posthire_cycle()
+    return {"ok": 1, "posthire": stats}
+
+
+@app.get("/posthire/status")
+async def posthire_status():
+    return {
+        "auto_execute_on_hire": AUTO_EXECUTE_ON_HIRE,
+        "auto_submit_deliverable": AUTO_SUBMIT_DELIVERABLE,
+        "last_posthire": _scan_state.get("last_posthire"),
     }
 
 
