@@ -402,9 +402,11 @@ async def generate_proposal(req: ProposalRequest):
                 f"proposal/cover letter that is {tone_desc}. "
                 "Include: 1) A hook addressing the client's need, "
                 "2) Relevant capabilities and approach, "
-                "3) Estimated timeline, "
+                "3) A specific timeline (use concrete numbers like '5-7 business days'), "
                 "4) A clear call to action. "
-                "Keep it under 300 words. Do NOT include pricing — that's handled separately."
+                "Keep it under 300 words. Do NOT include pricing — that's handled separately. "
+                "Do NOT use placeholder brackets like [Client Name], [X], or [Your Name]. "
+                "Address the client directly as 'you'. Sign off as 'Agent N9er'."
             ),
         },
         {
