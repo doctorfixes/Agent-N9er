@@ -20,7 +20,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pytest-asyncio httpx fastapi aiosqlite asyncpg pydantic uvicorn stripe
+          pip install -e ".[dev]"
+          pip install fastapi aiosqlite asyncpg uvicorn stripe
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short

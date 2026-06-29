@@ -81,6 +81,9 @@ export default function ProspectsPage() {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [proposalTarget, setProposalTarget] = useState(null);
+  const [executing, setExecuting] = useState(false);
+  const [execResult, setExecResult] = useState(null);
+  const [unsticking, setUnsticking] = useState(false);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
@@ -123,6 +126,26 @@ export default function ProspectsPage() {
     setScanning(false);
   };
 
+  const handleExecuteWork = async () => {
+    setExecuting(true);
+    setExecResult(null);
+    try {
+      const resp = await fetch("/api/prospects/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status_filter: "executing" }),
+      });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
+      setExecResult(data);
+      mutate();
+    } catch (e) {
+      setExecResult({ error: e.message });
+    }
+    setExecuting(false);
+  };
+
   const statusFilters = ["", "discovered", "approved", "applied", "hired", "executing", "delivered", "paid"];
 
   return (
@@ -144,6 +167,27 @@ export default function ProspectsPage() {
           <button className="cmd-btn success" onClick={handleFullScan} disabled={scanning}>
             {scanning ? "..." : "Full Scan"}
           </button>
+          <button className="cmd-btn primary" onClick={handleExecuteWork} disabled={executing} style={{ marginLeft: 8 }}>
+            {executing ? "Working..." : "Execute Work"}
+          </button>
+          <button className="cmd-btn" onClick={async () => {
+            setUnsticking(true);
+            try {
+              const resp = await fetch("/api/prospects/unstick", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ target_status: "approved" }),
+              });
+              const data = await resp.json();
+              setExecResult({ detail: `Reset ${data.reset || 0} of ${data.found || 0} stuck prospects to approved` });
+              mutate();
+            } catch (e) {
+              setExecResult({ error: e.message });
+            }
+            setUnsticking(false);
+          }} disabled={unsticking}>
+            {unsticking ? "..." : "Unstick"}
+          </button>
         </div>
       </div>
 
@@ -162,6 +206,28 @@ export default function ProspectsPage() {
           color: scanResult.error ? "#f87171" : "#34d399",
         }}>
           {scanResult.error ? `ERR: ${scanResult.error}` : `FOUND ${scanResult.discovered} // NEW ${scanResult.new}${scanResult.full ? " // FULL SCAN" : ""}`}
+        </div>
+      )}
+
+      {execResult && (
+        <div style={{
+          padding: "10px 14px", marginBottom: 12, borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12,
+          background: execResult.error ? "rgba(239,68,68,0.1)" : "rgba(16,185,129,0.1)",
+          border: `1px solid ${execResult.error ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.3)"}`,
+          color: execResult.error ? "#f87171" : "#34d399",
+        }}>
+          {execResult.error
+            ? `ERR: ${execResult.error}`
+            : `EXECUTED ${execResult.completed || 0}/${execResult.total || 0} // FAILED ${execResult.failed || 0} // COST $${execResult.total_cost_usd?.toFixed(4) || "0"}`}
+          {execResult.deliverables && execResult.deliverables.length > 0 && (
+            <div style={{ marginTop: 8, borderTop: "1px solid rgba(16,185,129,0.2)", paddingTop: 8 }}>
+              {execResult.deliverables.map((d, i) => (
+                <div key={i} style={{ fontSize: 10, marginBottom: 4, color: d.status === "delivered" ? "#34d399" : "#f87171" }}>
+                  {d.status === "delivered" ? "OK" : "FAIL"} // {d.title?.substring(0, 60)} {d.model && `// ${d.model}`} {d.cost_usd ? `// $${d.cost_usd.toFixed(4)}` : ""}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -201,8 +267,35 @@ export default function ProspectsPage() {
                 <td>{p.budget_max > 0 ? `$${p.budget_min}-$${p.budget_max}` : "---"}</td>
                 <td><span className={`badge ${p.status}`}>{p.status}</span></td>
                 <td style={{ fontSize: 10 }}>{p.discovered_at ? new Date(p.discovered_at).toLocaleDateString() : "---"}</td>
-                <td>
+                <td style={{ display: "flex", gap: 4 }}>
                   <button className="cmd-btn sm" onClick={() => setProposalTarget(p)}>Propose</button>
+                  {p.status === "executing" && (
+                    <button className="cmd-btn sm primary" onClick={async () => {
+                      try {
+                        const resp = await fetch("/api/prospects/execute", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ status_filter: "executing", prospect_id: p.id }),
+                        });
+                        const data = await resp.json();
+                        setExecResult(data);
+                        mutate();
+                      } catch (e) {
+                        setExecResult({ error: e.message });
+                      }
+                    }}>Execute</button>
+                  )}
+                  {p.status === "delivered" && (
+                    <button className="cmd-btn sm success" onClick={async () => {
+                      try {
+                        const resp = await fetch(`/api/prospects/deliverable?task_id=${p.id}`);
+                        const data = await resp.json();
+                        setExecResult({ total: 1, completed: 1, failed: 0, deliverables: [{ title: p.title, status: "delivered", output_preview: data.output || "No output stored" }] });
+                      } catch (e) {
+                        setExecResult({ error: e.message });
+                      }
+                    }}>View Output</button>
+                  )}
                 </td>
               </tr>
             )) : (

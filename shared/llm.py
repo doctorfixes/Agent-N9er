@@ -15,7 +15,7 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "3.0"))
+MARKUP_MULTIPLIER = float(os.getenv("MARKUP_MULTIPLIER", "8.0"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 PROVIDER_ORDER = ["openrouter", "anthropic", "openai", "azure", "gemini"]
@@ -27,7 +27,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 8192,
         "label": "Quick tasks, classification, simple Q&A",
         "models": {
-            "openrouter": "anthropic/claude-haiku-4-5-20251001",
+            "openrouter": "anthropic/claude-3-haiku",
             "anthropic": "claude-3-5-haiku-latest",
             "openai": "gpt-4o-mini",
             "azure": os.getenv("AZURE_OPENAI_BUDGET_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")),
@@ -40,10 +40,10 @@ BASE_MODEL_TIERS = {
         "max_tokens": 16384,
         "label": "Code generation, analysis, writing",
         "models": {
-            "openrouter": "anthropic/claude-sonnet-4-6",
-            "anthropic": "claude-sonnet-4-0",
-            "openai": "gpt-4.1",
-            "azure": os.getenv("AZURE_OPENAI_STANDARD_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")),
+            "openrouter": "anthropic/claude-3.5-sonnet:beta",
+            "anthropic": "claude-3-5-sonnet-latest",
+            "openai": "gpt-4o",
+            "azure": os.getenv("AZURE_OPENAI_STANDARD_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")),
             "gemini": "gemini-2.5-flash",
         },
     },
@@ -53,10 +53,10 @@ BASE_MODEL_TIERS = {
         "max_tokens": 32768,
         "label": "Complex reasoning, architecture, research",
         "models": {
-            "openrouter": "anthropic/claude-opus-4-8",
-            "anthropic": "claude-opus-4-1",
-            "openai": "gpt-5",
-            "azure": os.getenv("AZURE_OPENAI_PREMIUM_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5")),
+            "openrouter": "anthropic/claude-3-opus:beta",
+            "anthropic": "claude-3-opus-latest",
+            "openai": "gpt-4o",
+            "azure": os.getenv("AZURE_OPENAI_PREMIUM_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")),
             "gemini": "gemini-2.5-pro",
         },
     },
@@ -242,6 +242,8 @@ async def _openrouter_complete(
             "temperature": temperature,
         },
     )
+    if resp.status_code >= 400:
+        logger.error("OpenRouter error %d for model %s: %s", resp.status_code, model, resp.text[:500])
     resp.raise_for_status()
     data = resp.json()
     usage = data.get("usage", {})

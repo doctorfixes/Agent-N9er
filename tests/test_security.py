@@ -119,7 +119,8 @@ async def test_audit_log_records_bid(client):
 async def test_audit_log_records_award(client):
     await client.post("/publish", json={"id": "audit-t3", "objective": "award audit"})
     await client.post("/bid", json={
-        "task_id": "audit-t3", "agent_id": "a1", "confidence": 0.8
+        "task_id": "audit-t3", "agent_id": "a1", "confidence": 0.8,
+        "require_approval": False,
     })
     await client.post("/award/audit-t3")
     resp = await client.get("/audit")
@@ -132,7 +133,8 @@ async def test_audit_log_records_award(client):
 async def test_audit_log_records_complete(client):
     await client.post("/publish", json={"id": "audit-t4", "objective": "complete audit"})
     await client.post("/bid", json={
-        "task_id": "audit-t4", "agent_id": "a1", "confidence": 0.7
+        "task_id": "audit-t4", "agent_id": "a1", "confidence": 0.7,
+        "require_approval": False,
     })
     await client.post("/award/audit-t4")
     await client.post("/complete/audit-t4", json={"success": True})

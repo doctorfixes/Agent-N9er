@@ -7,7 +7,7 @@ import pytest
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, root)
 
-from shared.database import SQLiteDB, create_database, _adapt_query, _sqlite_to_pg
+from shared.database import SQLiteDB, create_database, _adapt_query, _sqlite_to_pg, _parse_dsn
 
 
 _tmpdir = tempfile.mkdtemp()
@@ -139,6 +139,41 @@ class TestDDLTranslation:
     def test_if_not_exists_preserved(self):
         result = _sqlite_to_pg("CREATE TABLE IF NOT EXISTS t (id TEXT)")
         assert "IF NOT EXISTS" in result
+
+
+class TestParseDSN:
+    def test_full_dsn(self):
+        result = _parse_dsn("postgresql://myuser:mypass@dbhost:5433/mydb")
+        assert result["host"] == "dbhost"
+        assert result["port"] == 5433
+        assert result["database"] == "mydb"
+        assert result["user"] == "myuser"
+        assert result["password"] == "mypass"
+
+    def test_dsn_defaults(self):
+        result = _parse_dsn("postgresql:///")
+        assert result["host"] == "localhost"
+        assert result["port"] == 5432
+        assert result["user"] == "postgres"
+        assert result["password"] == ""
+
+    def test_dsn_with_default_port(self):
+        result = _parse_dsn("postgresql://user:pass@myhost/testdb")
+        assert result["host"] == "myhost"
+        assert result["port"] == 5432
+        assert result["database"] == "testdb"
+        assert result["user"] == "user"
+        assert result["password"] == "pass"
+
+    def test_dsn_no_password(self):
+        result = _parse_dsn("postgresql://admin@localhost:5432/proddb")
+        assert result["user"] == "admin"
+        assert result["password"] == ""
+        assert result["database"] == "proddb"
+
+    def test_dsn_empty_path(self):
+        result = _parse_dsn("postgresql://user:pass@host:5432")
+        assert result["database"] == ""
 
 
 class TestCreateDatabase:

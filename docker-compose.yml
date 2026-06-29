@@ -32,6 +32,11 @@ services:
       - AUTO_SCAN_ENABLED=${AUTO_SCAN_ENABLED:-false}
       - SCAN_INTERVAL_SECONDS=${SCAN_INTERVAL_SECONDS:-3600}
       - SCAN_PLATFORMS=${SCAN_PLATFORMS:-upwork,github_bounties,freelancer,algora,topcoder}
+      - BID_REQUIRE_APPROVAL=${BID_REQUIRE_APPROVAL:-true}
+      - AUTO_DISPATCH_ENABLED=${AUTO_DISPATCH_ENABLED:-false}
+      - DISPATCH_RATE_DELAY_SECONDS=${DISPATCH_RATE_DELAY_SECONDS:-3}
+      - AUTO_EXECUTE_ON_HIRE=${AUTO_EXECUTE_ON_HIRE:-true}
+      - AUTO_SUBMIT_DELIVERABLE=${AUTO_SUBMIT_DELIVERABLE:-false}
       - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000
@@ -122,6 +127,7 @@ services:
       - "8300:8300"
     environment:
       - DB_PATH=/data/marketplace.db
+      - BID_REQUIRE_APPROVAL=${BID_REQUIRE_APPROVAL:-true}
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
     volumes:
       - marketplace-data:/data
@@ -339,6 +345,9 @@ services:
       - SMTP_PASS=${SMTP_PASS:-}
       - NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
       - NOTIFY_MIN_BUDGET=${NOTIFY_MIN_BUDGET:-100}
+      - FREELANCER_TOKEN=${FREELANCER_TOKEN:-}
+      - FREELANCER_ID=${FREELANCER_ID:-}
+      - BID_REQUIRE_APPROVAL=${BID_REQUIRE_APPROVAL:-true}
     volumes:
       - prospector-data:/data
     depends_on:

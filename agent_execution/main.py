@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import random
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -43,6 +44,13 @@ class ProposalRequest(BaseModel):
     budget_max: float = 0
     skills: str = ""
     tone: str = "professional"
+
+
+class RespondRequest(BaseModel):
+    prospect_id: str = ""
+    client_message: str
+    project_title: str = ""
+    project_description: str = ""
 
 
 @asynccontextmanager
@@ -402,9 +410,11 @@ async def generate_proposal(req: ProposalRequest):
                 f"proposal/cover letter that is {tone_desc}. "
                 "Include: 1) A hook addressing the client's need, "
                 "2) Relevant capabilities and approach, "
-                "3) Estimated timeline, "
+                "3) A specific timeline (use concrete numbers like '5-7 business days'), "
                 "4) A clear call to action. "
-                "Keep it under 300 words. Do NOT include pricing — that's handled separately."
+                "Keep it under 300 words. Do NOT include pricing — that's handled separately. "
+                "Do NOT use placeholder brackets like [Client Name], [X], or [Your Name]. "
+                "Address the client directly as 'you'. Sign off as 'RJ'."
             ),
         },
         {
@@ -425,10 +435,11 @@ async def generate_proposal(req: ProposalRequest):
 
     try:
         result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        cleaned = _clean_proposal(result.content)
         return {
             "ok": 1,
             "prospect_id": req.prospect_id,
-            "proposal": result.content,
+            "proposal": cleaned,
             "mode": "live",
             "model": result.model,
             "cost_usd": result.cost_usd,
@@ -437,6 +448,15 @@ async def generate_proposal(req: ProposalRequest):
     except Exception as e:
         logger.error("Proposal generation failed: %s", e)
         return _simulated_proposal(req)
+
+
+def _clean_proposal(text: str) -> str:
+    text = re.sub(r"Dear \[.*?\],?\n?", "", text)
+    text = re.sub(r"\[Client(?:\s+Name)?\]", "you", text)
+    text = re.sub(r"\[Your Name\]", "RJ", text)
+    text = re.sub(r"\[X\]", "5-7", text)
+    text = re.sub(r"\[.*?\]", "", text)
+    return text.strip()
 
 
 def _simulated_proposal(req: ProposalRequest) -> dict:
@@ -453,6 +473,148 @@ def _simulated_proposal(req: ProposalRequest) -> dict:
         "ok": 1,
         "prospect_id": req.prospect_id,
         "proposal": proposal,
+        "mode": "simulation",
+        "model": "none",
+        "cost_usd": 0,
+        "tokens": 0,
+    }
+
+
+class QuoteRequest(BaseModel):
+    prospect_id: str = ""
+    title: str = ""
+    description: str = ""
+    platform: str = "freelancer"
+    budget_min: float = 0
+    budget_max: float = 0
+    skills: str = ""
+    client_message: str = ""
+    conversation: list = []
+
+
+def _estimate_quote_price(req: QuoteRequest) -> dict:
+    """Estimate quote price as 7-10x the estimated token cost to deliver the work."""
+    desc_len = len(req.description or "") + len(req.title or "") + len(req.skills or "")
+    if desc_len > 2000:
+        complexity = "high"
+        estimated_output_tokens = 8000
+        multiplier = 10.0
+    elif desc_len > 500:
+        complexity = "medium"
+        estimated_output_tokens = 4000
+        multiplier = 8.5
+    else:
+        complexity = "low"
+        estimated_output_tokens = 2000
+        multiplier = 7.0
+
+    if req.budget_max > 500:
+        multiplier = min(multiplier + 1.5, 12.0)
+    elif req.budget_max > 200:
+        multiplier = min(multiplier + 0.5, 10.0)
+
+    from shared.llm import estimate_cost
+    cost_est = estimate_cost(
+        prompt=f"{req.title} {req.description} {req.skills}",
+        tier="standard",
+        expected_output_tokens=estimated_output_tokens,
+    )
+
+    raw_price = cost_est.estimated_cost_usd * multiplier
+    min_quote = float(os.getenv("MINIMUM_QUOTE_USD", "5.0"))
+    price = max(raw_price, min_quote)
+
+    if req.budget_min > 0:
+        price = max(price, req.budget_min * 0.7)
+    if req.budget_max > 0:
+        price = min(price, req.budget_max * 1.1)
+
+    price = round(price, 2)
+
+    return {
+        "price": price,
+        "complexity": complexity,
+        "multiplier": multiplier,
+        "estimated_token_cost": cost_est.estimated_cost_usd,
+        "estimated_output_tokens": estimated_output_tokens,
+    }
+
+
+@app.post("/quote")
+async def generate_quote(req: QuoteRequest):
+    pricing = _estimate_quote_price(req)
+    suggested_price = pricing["price"]
+
+    if not has_available_provider():
+        return _simulated_quote(req, suggested_price, pricing)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Agent N9er, an AI freelance agent responding to a client on "
+                f"{req.platform}. The client has responded to your bid and is asking for a quote or more details.\n\n"
+                f"Job: {req.title}\n"
+                f"Description: {req.description}\n"
+                f"Required Skills: {req.skills}\n"
+                f"Client Budget Range: ${req.budget_min}-${req.budget_max}\n"
+                f"Your Calculated Quote: ${suggested_price:.2f}\n"
+                f"Project Complexity: {pricing['complexity']}\n\n"
+                "Write a professional reply that:\n"
+                "1) Addresses the client's message directly\n"
+                f"2) Quotes exactly ${suggested_price:.2f} as your price — present it confidently with a brief breakdown\n"
+                "3) Outlines specific deliverables and realistic timeline\n"
+                "4) If the project seems urgent or high-value, note expedited delivery is available at a premium\n"
+                "5) Asks any clarifying questions if needed\n"
+                "Keep it conversational but professional. Under 250 words. "
+                "Do NOT say you are an AI."
+            ),
+        },
+    ]
+
+    for msg in req.conversation:
+        messages.append({
+            "role": msg.get("role", "user"),
+            "content": msg.get("content", ""),
+        })
+
+    if req.client_message:
+        messages.append({"role": "user", "content": f"Client says: {req.client_message}"})
+
+    try:
+        result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        return {
+            "ok": 1,
+            "prospect_id": req.prospect_id,
+            "reply": result.content,
+            "suggested_price": suggested_price,
+            "pricing": pricing,
+            "mode": "live",
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "tokens": result.input_tokens + result.output_tokens,
+        }
+    except Exception as e:
+        logger.error("Quote generation failed: %s", e)
+        return _simulated_quote(req, suggested_price, pricing)
+
+
+def _simulated_quote(req: QuoteRequest, price: float = 0, pricing: dict = None) -> dict:
+    if price <= 0:
+        price = req.budget_min if req.budget_min > 0 else 50
+    return {
+        "ok": 1,
+        "prospect_id": req.prospect_id,
+        "reply": (
+            f"Thank you for your interest! Based on the requirements for \"{req.title}\", "
+            f"I'd like to propose a quote of ${price:.2f}. "
+            "This includes thorough analysis of the requirements, implementation, "
+            "testing, and one round of revisions. "
+            "I can deliver within 5-7 business days. "
+            "Would you like to discuss any specific aspects of the project?"
+        ),
+        "suggested_price": price,
+        "pricing": pricing or {},
         "mode": "simulation",
         "model": "none",
         "cost_usd": 0,
@@ -539,3 +701,56 @@ def _format_html(output: str, task_id: str, row) -> str:
         f"<div class='content'><pre>{lines}</pre></div>"
         f"</div>"
     )
+
+
+@app.post("/respond")
+async def respond_to_client(req: RespondRequest):
+    """Generate a professional response to a client message."""
+    if not has_available_provider():
+        return {
+            "ok": 1,
+            "response": f"Thank you for your message regarding \"{req.project_title}\". "
+                        "I'll review your feedback and get back to you shortly with an update.",
+            "mode": "simulation",
+        }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are RJ, a professional freelancer responding to a client message. "
+                "Be professional, helpful, and concise. "
+                "If the client requests a revision, acknowledge it and confirm you'll work on it. "
+                "If they ask a question, answer clearly and directly. "
+                "Keep responses under 150 words. Sign off as 'RJ'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Project: {req.project_title}\n"
+                f"Project Description: {req.project_description[:500]}\n\n"
+                f"Client's message:\n{req.client_message}\n\n"
+                "Write a professional response to this client message."
+            ),
+        },
+    ]
+
+    try:
+        result = await complete(messages, tier="budget", max_tokens=512, temperature=0.4)
+        return {
+            "ok": 1,
+            "prospect_id": req.prospect_id,
+            "response": result.content.strip(),
+            "mode": "live",
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+        }
+    except Exception as e:
+        logger.error("Client response generation failed: %s", e)
+        return {
+            "ok": 1,
+            "response": f"Thank you for your message regarding \"{req.project_title}\". "
+                        "I'll review your feedback and get back to you shortly.",
+            "mode": "fallback",
+        }

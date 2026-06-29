@@ -35,6 +35,7 @@ function StatCard({ label, value, accent }) {
 
 export default function MissionControlPage() {
   const { data, error, isLoading } = useSWR("/api/mission-control", fetcher, { refreshInterval: 5000 });
+  const { data: awareness } = useSWR("/api/self-awareness", fetcher, { refreshInterval: 30000 });
 
   if (isLoading) return <p style={{ color: "#64748b" }}>Loading Mission Control…</p>;
   if (error) return <p style={{ color: "#ef4444" }}>Failed to load Mission Control data.</p>;
@@ -67,6 +68,53 @@ export default function MissionControlPage() {
           : services.map((svc) => <ServiceCard key={svc.name} svc={svc} />)
         }
       </div>
+
+      {/* Self-Awareness */}
+      {awareness && !awareness.error && (
+        <>
+          <h2 style={{ color: "#cbd5e1", fontSize: "15px", fontWeight: 600, marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+            Self-Awareness
+          </h2>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", marginBottom: "32px" }}>
+            <div style={{ background: "#1a1a2e", border: "1px solid #2d2d44", borderRadius: "8px", padding: "16px", flex: 1, minWidth: 220 }}>
+              <div style={{ fontSize: "11px", color: "#64748b", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Status</div>
+              <div style={{ fontSize: "14px", color: awareness.health?.status === "healthy" ? "#4ade80" : "#facc15", fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                {awareness.health?.status?.toUpperCase() || "UNKNOWN"} ({awareness.health?.services_online || "?"})
+              </div>
+              {awareness.issues?.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  {awareness.issues.map((issue, i) => (
+                    <div key={i} style={{ fontSize: "11px", color: "#f87171", fontFamily: "var(--font-mono)", padding: "1px 0" }}>! {issue}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{ background: "#1a1a2e", border: "1px solid #2d2d44", borderRadius: "8px", padding: "16px", flex: 1, minWidth: 220 }}>
+              <div style={{ fontSize: "11px", color: "#64748b", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Stability (24h)</div>
+              <div style={{ display: "flex", gap: 16 }}>
+                <div>
+                  <span style={{ fontSize: "20px", fontWeight: 700, color: awareness.stability?.errors_24h > 0 ? "#f87171" : "#4ade80" }}>
+                    {awareness.stability?.errors_24h ?? 0}
+                  </span>
+                  <span style={{ fontSize: "11px", color: "#64748b", marginLeft: 4 }}>errors</span>
+                </div>
+                <div>
+                  <span style={{ fontSize: "20px", fontWeight: 700, color: awareness.stability?.warnings_24h > 0 ? "#facc15" : "#4ade80" }}>
+                    {awareness.stability?.warnings_24h ?? 0}
+                  </span>
+                  <span style={{ fontSize: "11px", color: "#64748b", marginLeft: 4 }}>warnings</span>
+                </div>
+              </div>
+            </div>
+            <div style={{ background: "#1a1a2e", border: "1px solid #2d2d44", borderRadius: "8px", padding: "16px", flex: 1, minWidth: 220 }}>
+              <div style={{ fontSize: "11px", color: "#64748b", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Recommendations</div>
+              {awareness.recommendations?.map((rec, i) => (
+                <div key={i} style={{ fontSize: "11px", color: "#4ade80", fontFamily: "var(--font-mono)", padding: "1px 0" }}>+ {rec}</div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Recent Signals */}
       <h2 style={{ color: "#cbd5e1", fontSize: "15px", fontWeight: 600, marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.08em" }}>

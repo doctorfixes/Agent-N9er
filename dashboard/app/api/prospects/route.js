@@ -8,10 +8,14 @@ function svcHeaders() {
 }
 
 export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status");
-  const qs = status ? `?status=${status}` : "";
-  const resp = await fetch(`${PROSPECTOR_URL}/prospects${qs}`, { headers: svcHeaders() });
-  const data = await resp.json();
-  return Response.json(data);
+  try {
+    const { searchParams } = new URL(request.url);
+    const status = searchParams.get("status");
+    const qs = status ? `?status=${status}` : "";
+    const resp = await fetch(`${PROSPECTOR_URL}/prospects${qs}`, { headers: svcHeaders() });
+    const data = await resp.json();
+    return Response.json(data);
+  } catch {
+    return Response.json([], { status: 502 });
+  }
 }

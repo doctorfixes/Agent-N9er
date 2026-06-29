@@ -3,7 +3,7 @@
 import { useState, useRef } from "react";
 import useSWR from "swr";
 
-const fetcher = (url) => fetch(url).then((r) => r.json()).catch(() => null);
+const fetcher = (url) => fetch(url).then((r) => { if (!r.ok) return null; return r.json(); }).catch(() => null);
 
 function Panel({ title, dot, children, actions }) {
   return (
@@ -40,6 +40,7 @@ export default function MissionControl() {
   const [mode, setMode] = useState("full");
   const [taskResult, setTaskResult] = useState(null);
   const [dispatching, setDispatching] = useState(false);
+  const [posthiring, setPosthiring] = useState(false);
   const [ruleObjective, setRuleObjective] = useState("");
   const [ruleCategory, setRuleCategory] = useState("uncategorized");
   const [activity, setActivity] = useState([]);
@@ -52,6 +53,7 @@ export default function MissionControl() {
   const { data: agents } = useSWR("/api/agents", fetcher, { refreshInterval: 10000 });
   const { data: analytics } = useSWR("/api/analytics?days=1", fetcher, { refreshInterval: 30000 });
   const { data: scanState } = useSWR("/api/scan", fetcher, { refreshInterval: 30000 });
+  const { data: posthireState } = useSWR("/api/posthire", fetcher, { refreshInterval: 30000 });
 
   const addActivity = (msg, type = "info") => {
     const entry = { time: new Date().toLocaleTimeString("en-US", { hour12: false }), msg, type };
@@ -79,7 +81,9 @@ export default function MissionControl() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ objective }),
       });
-      const data = await resp.json();
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
       setTaskResult(data);
       if (data.status === "completed") {
         addActivity(`Task ${data.task_id?.substring(0, 8)} completed by ${data.winner?.agent_id}`, "success");
@@ -124,6 +128,58 @@ export default function MissionControl() {
     } catch (e) {
       addActivity(`Trigger failed: ${e.message}`, "error");
     }
+  };
+
+  const triggerDispatch = async () => {
+    setDispatching(true);
+    addActivity("Dispatch: evaluating discovered prospects...", "info");
+    try {
+      const resp = await fetch("/api/dispatch", { method: "POST" });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
+      if (data.error) {
+        addActivity(`Dispatch failed: ${data.error}`, "error");
+      } else {
+        const d = data.dispatch || {};
+        addActivity(
+          `Dispatch complete: ${d.evaluated || 0} evaluated, ${d.approved || 0} approved, ${d.proposals || 0} proposals, ${d.bids_queued || 0} bids queued`,
+          d.bids_queued > 0 ? "success" : "info"
+        );
+      }
+    } catch (e) {
+      addActivity(`Dispatch failed: ${e.message}`, "error");
+    }
+    setDispatching(false);
+  };
+
+  const triggerPosthire = async () => {
+    setPosthiring(true);
+    addActivity("Post-hire: checking awards, payments, reviews...", "info");
+    try {
+      const resp = await fetch("/api/posthire", { method: "POST" });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
+      if (data.error) {
+        addActivity(`Post-hire failed: ${data.error}`, "error");
+      } else {
+        const p = data.posthire || {};
+        const parts = [];
+        if (p.newly_hired > 0) parts.push(`${p.newly_hired} hired`);
+        if (p.executed > 0) parts.push(`${p.executed} executed`);
+        if (p.payments > 0) parts.push(`${p.payments} paid`);
+        if (p.reviews > 0) parts.push(`${p.reviews} reviewed`);
+        const summary = parts.length > 0 ? parts.join(", ") : "no changes";
+        addActivity(
+          `Post-hire complete: ${summary} (${p.awards_checked || 0} bids checked)`,
+          parts.length > 0 ? "success" : "info"
+        );
+      }
+    } catch (e) {
+      addActivity(`Post-hire failed: ${e.message}`, "error");
+    }
+    setPosthiring(false);
   };
 
   return (
@@ -240,6 +296,33 @@ export default function MissionControl() {
         </Panel>
       </div>
 
+      <div className="cmd-grid cols-2" style={{ marginBottom: 16 }}>
+        <Panel title="Post-Hire Pipeline" dot={posthireState?.last_posthire?.newly_hired > 0 ? "success" : ""} actions={
+          <button className="cmd-btn sm primary" onClick={triggerPosthire} disabled={posthiring}>
+            {posthiring ? ">>>" : "Check Now"}
+          </button>
+        }>
+          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
+            <Metric label="Awards Checked" value={posthireState?.last_posthire?.awards_checked ?? 0} color="blue" />
+            <Metric label="Hired" value={posthireState?.last_posthire?.newly_hired ?? 0} color="green" />
+            <Metric label="Executed" value={posthireState?.last_posthire?.executed ?? 0} color="cyan" />
+            <Metric label="Payments" value={posthireState?.last_posthire?.payments ?? 0} color="purple" sub={posthireState?.last_posthire?.reviews > 0 ? `${posthireState.last_posthire.reviews} reviewed` : "---"} />
+          </div>
+          <div style={{ marginTop: 10, display: "flex", gap: 16, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+            <span>Auto-execute: <span style={{ color: posthireState?.auto_execute_on_hire ? "var(--accent-green)" : "var(--accent-red)" }}>{posthireState?.auto_execute_on_hire ? "ON" : "OFF"}</span></span>
+            <span>Auto-submit: <span style={{ color: posthireState?.auto_submit_deliverable ? "var(--accent-green)" : "var(--accent-red)" }}>{posthireState?.auto_submit_deliverable ? "ON" : "OFF"}</span></span>
+          </div>
+        </Panel>
+
+        <Panel title="Revenue Stats" dot="">
+          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+            <Metric label="Applied" value={taskList.filter(t => t.status === "applied").length} color="blue" sub="Bids out" />
+            <Metric label="Hired" value={taskList.filter(t => t.status === "hired").length} color="green" sub="In progress" />
+            <Metric label="Delivered" value={taskList.filter(t => t.status === "delivered").length} color="cyan" sub="Awaiting payment" />
+          </div>
+        </Panel>
+      </div>
+
       <div className="cmd-grid cols-2">
         <Panel title="Recurring Automation" dot="" actions={
           <button className="cmd-btn sm success" onClick={triggerRecurring}>Trigger All</button>
@@ -274,15 +357,21 @@ export default function MissionControl() {
           )}
         </Panel>
 
-        <Panel title="Scan Status" dot={scanState?.running ? "warn" : ""} actions={
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: scanState?.auto_scan_enabled ? "var(--accent-green)" : "var(--text-muted)" }}>
-            {scanState?.auto_scan_enabled ? "AUTO" : "MANUAL"}
-          </span>
+        <Panel title="Scan & Dispatch" dot={scanState?.running ? "warn" : ""} actions={
+          <>
+            <button className="cmd-btn sm primary" onClick={triggerDispatch} disabled={dispatching}>
+              {dispatching ? ">>>" : "Dispatch"}
+            </button>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: scanState?.auto_scan_enabled ? "var(--accent-green)" : "var(--text-muted)" }}>
+              {scanState?.auto_scan_enabled ? "AUTO" : "MANUAL"}
+            </span>
+          </>
         }>
-          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+          <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
             <Metric label="Total Scans" value={scanState?.total_scans ?? 0} color="blue" />
             <Metric label="Discovered" value={scanState?.total_discovered ?? 0} color="green" />
             <Metric label="Platforms" value={scanState?.platforms?.length ?? 0} color="cyan" />
+            <Metric label="Bids Queued" value={scanState?.last_dispatch?.bids_queued ?? 0} color="purple" sub={scanState?.last_dispatch ? `${scanState.last_dispatch.approved || 0} approved` : "---"} />
           </div>
           {scanState?.last_scan_at && (
             <div style={{ marginTop: 10, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>

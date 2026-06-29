@@ -137,7 +137,8 @@ class TestMarketplaceFlow:
 
         for agent_id, conf in [("fast-agent", 0.7), ("smart-agent", 0.95), ("cheap-agent", 0.5)]:
             await mp_client.post("/bid", json={
-                "task_id": "e2e-t1", "agent_id": agent_id, "confidence": conf
+                "task_id": "e2e-t1", "agent_id": agent_id, "confidence": conf,
+                "require_approval": False,
             })
 
         bids = (await mp_client.get("/bids/e2e-t1")).json()
@@ -158,7 +159,8 @@ class TestMarketplaceFlow:
             "id": "e2e-aud", "objective": "Audit trail test"
         })
         await mp_client.post("/bid", json={
-            "task_id": "e2e-aud", "agent_id": "a1", "confidence": 0.8
+            "task_id": "e2e-aud", "agent_id": "a1", "confidence": 0.8,
+            "require_approval": False,
         })
         await mp_client.post("/award/e2e-aud")
         await mp_client.post("/complete/e2e-aud", json={"success": True})

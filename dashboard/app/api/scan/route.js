@@ -8,16 +8,24 @@ function headers() {
 }
 
 export async function GET() {
-  const resp = await fetch(`${ORCHESTRATOR_URL}/scan/status`, { headers: headers() });
-  const data = await resp.json();
-  return Response.json(data, { status: resp.status });
+  try {
+    const resp = await fetch(`${ORCHESTRATOR_URL}/scan/status`, { headers: headers() });
+    const data = await resp.json();
+    return Response.json(data, { status: resp.status });
+  } catch {
+    return Response.json({ running: false, total_scans: 0, total_discovered: 0, platforms: [] }, { status: 502 });
+  }
 }
 
 export async function POST() {
-  const resp = await fetch(`${ORCHESTRATOR_URL}/scan/trigger`, {
-    method: "POST",
-    headers: headers(),
-  });
-  const data = await resp.json();
-  return Response.json(data, { status: resp.status });
+  try {
+    const resp = await fetch(`${ORCHESTRATOR_URL}/scan/trigger`, {
+      method: "POST",
+      headers: headers(),
+    });
+    const data = await resp.json();
+    return Response.json(data, { status: resp.status });
+  } catch {
+    return Response.json({ error: "Scan service unreachable" }, { status: 502 });
+  }
 }
