@@ -715,3 +715,139 @@ async def test_full_pipeline_bid_submission_error(client):
             resp = await client.post("/pipeline/full", json={"objective": "test"})
 
     assert resp.status_code in (200, 502)
+
+
+# --- Dispatch tests ---
+
+async def test_dispatch_status_endpoint(client):
+    resp = await client.get("/dispatch/status")
+    data = resp.json()
+    assert "auto_dispatch_enabled" in data
+    assert "auto_scan_enabled" in data
+
+
+async def test_dispatch_trigger_with_no_prospects(client):
+    """Dispatch with no discovered prospects returns zero stats."""
+    prospects_resp = _make_response([])
+
+    async def mock_get(url, **kwargs):
+        return prospects_resp
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = AsyncMock(return_value=_make_response({"ok": 1}))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/dispatch")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["dispatch"]["evaluated"] == 0
+    assert data["dispatch"]["approved"] == 0
+
+
+async def test_dispatch_evaluates_and_queues_bids(client):
+    """Dispatch evaluates prospects, generates proposals, and queues bids."""
+    prospects_data = [
+        {"id": "dp1", "title": "Test Project", "description": "Build something",
+         "platform": "freelancer", "budget_min": 50, "budget_max": 200, "skills": "python"},
+    ]
+
+    eval_data = {
+        "ok": 1, "status": "approved",
+        "evaluation": {"quoted_price_usd": 150, "estimated_cost_usd": 20,
+                       "complexity": "moderate", "recommended_tier": "standard"},
+    }
+
+    proposal_data = {"ok": 1, "proposal": "I can do this.", "mode": "simulation"}
+
+    bid_data = {"ok": 1, "status": "pending_approval", "bid_id": "b1"}
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return _make_response(prospects_data)
+        return _make_response({})
+
+    async def mock_post(url, **kwargs):
+        if "evaluate" in url:
+            return _make_response(eval_data)
+        if "proposal" in url:
+            return _make_response(proposal_data)
+        if "bid" in url:
+            return _make_response(bid_data)
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/dispatch")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    dispatch = data["dispatch"]
+    assert dispatch["evaluated"] == 1
+    assert dispatch["approved"] == 1
+
+
+async def test_dispatch_handles_rejected_prospects(client):
+    """Dispatch skips rejected prospects without queuing bids."""
+    prospects_data = [
+        {"id": "dp2", "title": "Bad project", "description": "Not viable",
+         "platform": "upwork", "budget_min": 0, "budget_max": 5, "skills": ""},
+    ]
+
+    eval_data = {
+        "ok": 1, "status": "rejected",
+        "evaluation": {"rejection_reason": "too cheap"},
+    }
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return _make_response(prospects_data)
+        return _make_response({})
+
+    async def mock_post(url, **kwargs):
+        if "evaluate" in url:
+            return _make_response(eval_data)
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/dispatch")
+
+    data = resp.json()
+    dispatch = data["dispatch"]
+    assert dispatch["evaluated"] == 1
+    assert dispatch["approved"] == 0
+    assert dispatch["bids_queued"] == 0
+
+
+async def test_dispatch_handles_service_error(client):
+    """Dispatch handles network errors gracefully."""
+    import httpx as httpx_lib
+
+    async def mock_get(url, **kwargs):
+        raise httpx_lib.ConnectError("Connection refused")
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/dispatch")
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["dispatch"]["errors"] >= 1

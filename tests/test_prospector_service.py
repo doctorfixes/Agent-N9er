@@ -1521,3 +1521,618 @@ class TestListProspectsByPlatform:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["platform"] == "github_bounties"
+
+
+# ---------------------------------------------------------------------------
+# Test _parse_github_issue_url
+# ---------------------------------------------------------------------------
+
+class TestParseGitHubIssueUrl:
+    def test_valid_url(self):
+        result = prospector._parse_github_issue_url("https://github.com/org/repo/issues/42")
+        assert result == ("org", "repo", 42)
+
+    def test_valid_url_with_http(self):
+        result = prospector._parse_github_issue_url("http://github.com/owner/project/issues/1")
+        assert result == ("owner", "project", 1)
+
+    def test_invalid_url_no_issues(self):
+        assert prospector._parse_github_issue_url("https://github.com/org/repo/pull/5") is None
+
+    def test_invalid_url_not_github(self):
+        assert prospector._parse_github_issue_url("https://gitlab.com/org/repo/issues/1") is None
+
+    def test_empty_string(self):
+        assert prospector._parse_github_issue_url("") is None
+
+    def test_none(self):
+        assert prospector._parse_github_issue_url(None) is None
+
+    def test_url_with_trailing_path(self):
+        result = prospector._parse_github_issue_url("https://github.com/a/b/issues/99")
+        assert result == ("a", "b", 99)
+
+
+# ---------------------------------------------------------------------------
+# Test bid submission — Freelancer path
+# ---------------------------------------------------------------------------
+
+class TestFreelancerBidSubmission:
+    async def test_submit_bid_pending_approval(self, client):
+        await prospector._save_prospect({
+            "id": "bid1", "platform": "freelancer", "platform_job_id": "fl-123",
+            "title": "Freelancer Job", "description": "Build website",
+            "budget_min": 100, "budget_max": 500, "status": "approved",
+        })
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.BID_REQUIRE_APPROVAL = True
+        try:
+            resp = await client.post("/prospects/bid1/bid", json={
+                "prospect_id": "bid1", "amount": 300, "period": 7, "description": "My proposal",
+            })
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "pending_approval"
+            assert "bid_id" in data
+            assert data["platform"] == "freelancer"
+            assert data["amount"] == 300
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+            prospector._pending_bids.clear()
+
+    async def test_submit_bid_no_token_returns_503(self, client):
+        await prospector._save_prospect({
+            "id": "bid2", "platform": "freelancer", "platform_job_id": "fl-456",
+            "title": "Job", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "approved",
+        })
+
+        original = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = ""
+        try:
+            resp = await client.post("/prospects/bid2/bid", json={
+                "prospect_id": "bid2", "amount": 50, "description": "test",
+            })
+            assert resp.status_code == 503
+            assert "FREELANCER_TOKEN" in resp.json()["detail"]
+        finally:
+            prospector.FREELANCER_TOKEN = original
+
+    async def test_submit_bid_unsupported_platform(self, client):
+        await prospector._save_prospect({
+            "id": "bid3", "platform": "upwork", "platform_job_id": "up-789",
+            "title": "Upwork Job", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "approved",
+        })
+        resp = await client.post("/prospects/bid3/bid", json={
+            "prospect_id": "bid3", "amount": 100, "description": "test",
+        })
+        assert resp.status_code == 400
+        assert "not supported" in resp.json()["detail"]
+
+    async def test_submit_bid_nonexistent_prospect(self, client):
+        resp = await client.post("/prospects/no-such-id/bid", json={
+            "prospect_id": "no-such-id", "amount": 100, "description": "test",
+        })
+        assert resp.status_code == 404
+
+    async def test_submit_bid_no_platform_job_id(self, client):
+        await prospector._save_prospect({
+            "id": "bid4", "platform": "freelancer", "platform_job_id": "",
+            "title": "No Job ID", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "approved",
+        })
+
+        original = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = "test-token"
+        try:
+            resp = await client.post("/prospects/bid4/bid", json={
+                "prospect_id": "bid4", "amount": 50, "description": "test",
+            })
+            assert resp.status_code == 400
+            assert "platform job ID" in resp.json()["detail"]
+        finally:
+            prospector.FREELANCER_TOKEN = original
+
+    async def test_freelancer_bid_direct_submission(self, client):
+        """Test bid goes directly to Freelancer when approval is disabled."""
+        await prospector._save_prospect({
+            "id": "bid5", "platform": "freelancer", "platform_job_id": "90001",
+            "title": "Direct Submit", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "approved",
+        })
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={"result": {"id": 999}})
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/bid5/bid", json={
+                    "prospect_id": "bid5", "amount": 75, "period": 5, "description": "proposal",
+                })
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "submitted"
+
+            prospect = (await client.get("/prospects/bid5")).json()
+            assert prospect["status"] == "applied"
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+
+# ---------------------------------------------------------------------------
+# Test bid submission — GitHub bounties path
+# ---------------------------------------------------------------------------
+
+class TestGitHubBidSubmission:
+    async def test_submit_github_bid_pending_approval(self, client):
+        await prospector._save_prospect({
+            "id": "gh1", "platform": "github_bounties", "platform_job_id": "12345",
+            "title": "Fix memory leak", "description": "Memory issue",
+            "budget_min": 0, "budget_max": 500,
+            "url": "https://github.com/org/repo/issues/42", "status": "approved",
+        })
+
+        original_token = prospector.GITHUB_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        prospector.BID_REQUIRE_APPROVAL = True
+        try:
+            resp = await client.post("/prospects/gh1/bid", json={
+                "prospect_id": "gh1", "amount": 400, "description": "I can fix this",
+            })
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "pending_approval"
+            assert data["platform"] == "github_bounties"
+            assert data["url"] == "https://github.com/org/repo/issues/42"
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+            prospector._pending_bids.clear()
+
+    async def test_submit_github_bid_no_token_returns_503(self, client):
+        await prospector._save_prospect({
+            "id": "gh2", "platform": "github_bounties", "platform_job_id": "67890",
+            "title": "Add feature", "description": "",
+            "budget_min": 0, "budget_max": 0,
+            "url": "https://github.com/o/r/issues/1", "status": "approved",
+        })
+
+        original = prospector.GITHUB_TOKEN
+        prospector.GITHUB_TOKEN = ""
+        try:
+            resp = await client.post("/prospects/gh2/bid", json={
+                "prospect_id": "gh2", "amount": 100, "description": "test",
+            })
+            assert resp.status_code == 503
+            assert "GITHUB_TOKEN" in resp.json()["detail"]
+        finally:
+            prospector.GITHUB_TOKEN = original
+
+    async def test_github_bid_direct_submission(self, client):
+        """Test GitHub comment posted directly when approval is disabled."""
+        await prospector._save_prospect({
+            "id": "gh3", "platform": "github_bounties", "platform_job_id": "111",
+            "title": "Bounty task", "description": "Fix it",
+            "budget_min": 0, "budget_max": 200,
+            "url": "https://github.com/myorg/myrepo/issues/7", "status": "approved",
+        })
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={
+            "html_url": "https://github.com/myorg/myrepo/issues/7#issuecomment-123",
+        })
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.GITHUB_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/gh3/bid", json={
+                    "prospect_id": "gh3", "amount": 150, "description": "My proposal text",
+                })
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "submitted"
+            assert data["platform"] == "github_bounties"
+            assert data["issue"] == "myorg/myrepo#7"
+            assert "issuecomment" in data["comment_url"]
+
+            prospect = (await client.get("/prospects/gh3")).json()
+            assert prospect["status"] == "applied"
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+    async def test_github_bid_invalid_url(self, client):
+        """Test GitHub bid fails gracefully when issue URL is unparseable."""
+        await prospector._save_prospect({
+            "id": "gh4", "platform": "github_bounties", "platform_job_id": "222",
+            "title": "Bad URL", "description": "",
+            "budget_min": 0, "budget_max": 0,
+            "url": "https://example.com/not-github", "status": "approved",
+        })
+
+        original_token = prospector.GITHUB_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            resp = await client.post("/prospects/gh4/bid", json={
+                "prospect_id": "gh4", "amount": 50, "description": "test",
+            })
+            assert resp.status_code == 400
+            assert "parse" in resp.json()["detail"].lower()
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+
+# ---------------------------------------------------------------------------
+# Test pending bids listing, approval, and rejection
+# ---------------------------------------------------------------------------
+
+class TestPendingBidsManagement:
+    async def test_list_pending_bids_empty(self, client):
+        prospector._pending_bids.clear()
+        resp = await client.get("/bids/pending")
+        assert resp.json() == []
+
+    async def test_list_pending_bids_with_data(self, client):
+        prospector._pending_bids.clear()
+        prospector._pending_bids["bid-aaa"] = {
+            "prospect_id": "p1", "project_id": "fl-1", "platform": "freelancer",
+            "title": "Test", "amount": 100, "period": 7,
+            "milestone_percentage": 100, "description": "desc",
+        }
+        resp = await client.get("/bids/pending")
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["bid_id"] == "bid-aaa"
+        assert data[0]["platform"] == "freelancer"
+        prospector._pending_bids.clear()
+
+    async def test_reject_bid(self, client):
+        prospector._pending_bids["bid-reject"] = {
+            "prospect_id": "p1", "project_id": "fl-1", "platform": "freelancer",
+            "title": "Reject me", "amount": 50, "period": 7,
+            "milestone_percentage": 100, "description": "desc",
+        }
+        resp = await client.post("/bids/bid-reject/reject")
+        data = resp.json()
+        assert data["ok"] == 1
+        assert data["status"] == "rejected"
+        assert "bid-reject" not in prospector._pending_bids
+
+    async def test_reject_nonexistent_bid(self, client):
+        prospector._pending_bids.clear()
+        resp = await client.post("/bids/no-such-bid/reject")
+        assert resp.status_code == 404
+
+    async def test_approve_nonexistent_bid(self, client):
+        prospector._pending_bids.clear()
+        resp = await client.post("/bids/no-such-bid/approve")
+        assert resp.status_code == 404
+
+    async def test_approve_freelancer_bid(self, client):
+        await prospector._save_prospect({
+            "id": "ap1", "platform": "freelancer", "platform_job_id": "90002",
+            "title": "Approve Me", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "approved",
+        })
+        prospector._pending_bids["bid-approve"] = {
+            "prospect_id": "ap1", "project_id": "90002", "platform": "freelancer",
+            "title": "Approve Me", "amount": 80, "period": 5,
+            "milestone_percentage": 100, "description": "proposal text",
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={"result": {"id": 777}})
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/bids/bid-approve/approve")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "submitted"
+            assert "bid-approve" not in prospector._pending_bids
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+    async def test_approve_github_bid(self, client):
+        await prospector._save_prospect({
+            "id": "ap2", "platform": "github_bounties", "platform_job_id": "gh-approve",
+            "title": "GitHub Approve", "description": "",
+            "budget_min": 0, "budget_max": 300,
+            "url": "https://github.com/test/repo/issues/10", "status": "approved",
+        })
+        prospector._pending_bids["bid-gh-approve"] = {
+            "prospect_id": "ap2", "project_id": "gh-approve", "platform": "github_bounties",
+            "title": "GitHub Approve", "url": "https://github.com/test/repo/issues/10",
+            "amount": 250, "period": 7, "milestone_percentage": 100,
+            "description": "I'll fix this issue",
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={
+            "html_url": "https://github.com/test/repo/issues/10#issuecomment-456",
+        })
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.GITHUB_TOKEN
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/bids/bid-gh-approve/approve")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["status"] == "submitted"
+            assert data["platform"] == "github_bounties"
+            assert data["issue"] == "test/repo#10"
+            assert "bid-gh-approve" not in prospector._pending_bids
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+
+    async def test_approve_bid_defaults_to_freelancer(self, client):
+        """Old pending bids without platform field should route to Freelancer."""
+        await prospector._save_prospect({
+            "id": "ap3", "platform": "freelancer", "platform_job_id": "90003",
+            "title": "Legacy", "description": "", "budget_min": 0,
+            "budget_max": 50, "status": "approved",
+        })
+        prospector._pending_bids["bid-legacy"] = {
+            "prospect_id": "ap3", "project_id": "90003",
+            "title": "Legacy", "amount": 40, "period": 7,
+            "milestone_percentage": 100, "description": "old bid",
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(return_value={"result": {"id": 888}})
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/bids/bid-legacy/approve")
+            assert resp.json()["status"] == "submitted"
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+
+# ---------------------------------------------------------------------------
+# Test Freelancer bid API error handling
+# ---------------------------------------------------------------------------
+
+class TestFreelancerBidErrors:
+    async def test_freelancer_api_http_error(self, client):
+        await prospector._save_prospect({
+            "id": "fle1", "platform": "freelancer", "platform_job_id": "90004",
+            "title": "Error Job", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "approved",
+        })
+
+        import httpx as httpx_lib
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.json = MagicMock(return_value={"message": "Already bid"})
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx_lib.HTTPStatusError(
+                "Forbidden",
+                request=httpx_lib.Request("POST", "http://test"),
+                response=httpx_lib.Response(403),
+            )
+        )
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/fle1/bid", json={
+                    "prospect_id": "fle1", "amount": 50, "description": "test",
+                })
+            assert resp.status_code == 403
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+    async def test_freelancer_api_unreachable(self, client):
+        await prospector._save_prospect({
+            "id": "fle2", "platform": "freelancer", "platform_job_id": "90005",
+            "title": "Unreachable", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "approved",
+        })
+
+        mock_http = _mock_http_error()
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/fle2/bid", json={
+                    "prospect_id": "fle2", "amount": 50, "description": "test",
+                })
+            assert resp.status_code == 503
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+    async def test_freelancer_no_bidder_id(self, client):
+        await prospector._save_prospect({
+            "id": "fle3", "platform": "freelancer", "platform_job_id": "90006",
+            "title": "No ID", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "approved",
+        })
+
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = ""
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            resp = await client.post("/prospects/fle3/bid", json={
+                "prospect_id": "fle3", "amount": 50, "description": "test",
+            })
+            assert resp.status_code == 503
+            assert "FREELANCER_ID" in resp.json()["detail"]
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+
+# ---------------------------------------------------------------------------
+# Test GitHub comment API error handling
+# ---------------------------------------------------------------------------
+
+class TestGitHubCommentErrors:
+    async def test_github_api_http_error(self, client):
+        await prospector._save_prospect({
+            "id": "ghe1", "platform": "github_bounties", "platform_job_id": "333",
+            "title": "GH Error", "description": "",
+            "budget_min": 0, "budget_max": 0,
+            "url": "https://github.com/o/r/issues/1", "status": "approved",
+        })
+
+        import httpx as httpx_lib
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 422
+        mock_resp.json = MagicMock(return_value={"message": "Validation Failed"})
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx_lib.HTTPStatusError(
+                "Unprocessable",
+                request=httpx_lib.Request("POST", "http://test"),
+                response=httpx_lib.Response(422),
+            )
+        )
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        original_token = prospector.GITHUB_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/ghe1/bid", json={
+                    "prospect_id": "ghe1", "amount": 100, "description": "test",
+                })
+            assert resp.status_code == 422
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+    async def test_github_api_unreachable(self, client):
+        await prospector._save_prospect({
+            "id": "ghe2", "platform": "github_bounties", "platform_job_id": "444",
+            "title": "GH Unreachable", "description": "",
+            "budget_min": 0, "budget_max": 0,
+            "url": "https://github.com/o/r/issues/2", "status": "approved",
+        })
+
+        mock_http = _mock_http_error()
+
+        original_token = prospector.GITHUB_TOKEN
+        original_approval = prospector.BID_REQUIRE_APPROVAL
+        prospector.GITHUB_TOKEN = "ghp_testtoken"
+        prospector.BID_REQUIRE_APPROVAL = False
+        try:
+            with patch.object(prospector.httpx, "AsyncClient", return_value=mock_http):
+                resp = await client.post("/prospects/ghe2/bid", json={
+                    "prospect_id": "ghe2", "amount": 100, "description": "test",
+                })
+            assert resp.status_code == 503
+        finally:
+            prospector.GITHUB_TOKEN = original_token
+            prospector.BID_REQUIRE_APPROVAL = original_approval
+
+
+# ---------------------------------------------------------------------------
+# Test _get_by_platform_id helper
+# ---------------------------------------------------------------------------
+
+class TestGetByPlatformId:
+    async def test_found(self, client):
+        await prospector._save_prospect({
+            "id": "gp1", "platform": "freelancer", "platform_job_id": "gp-fl-1",
+            "title": "Find Me", "description": "", "budget_min": 0,
+            "budget_max": 0, "status": "discovered",
+        })
+        result = await prospector._get_by_platform_id("freelancer", "gp-fl-1")
+        assert result is not None
+        assert result["title"] == "Find Me"
+
+    async def test_not_found(self, client):
+        result = await prospector._get_by_platform_id("freelancer", "nonexistent")
+        assert result is None

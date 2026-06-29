@@ -254,3 +254,165 @@ async def test_analytics_with_days_param(client):
     resp = await client.get("/analytics", params={"days": 7})
     data = resp.json()
     assert data["period_days"] == 7
+
+
+# --- _clean_proposal tests ---
+
+class TestCleanProposal:
+    def test_removes_dear_bracket(self):
+        text = "Dear [Client Name],\nHello there."
+        assert execution._clean_proposal(text) == "Hello there."
+
+    def test_replaces_client_name_with_you(self):
+        text = "I can help [Client Name] with this."
+        assert "you" in execution._clean_proposal(text)
+        assert "[Client" not in execution._clean_proposal(text)
+
+    def test_replaces_client_with_you(self):
+        text = "Dear [Client], I can deliver."
+        result = execution._clean_proposal(text)
+        assert "[Client]" not in result
+
+    def test_replaces_your_name_with_rj(self):
+        text = "Best regards,\n[Your Name]"
+        assert "RJ" in execution._clean_proposal(text)
+        assert "[Your Name]" not in execution._clean_proposal(text)
+
+    def test_replaces_x_with_days(self):
+        text = "I can deliver in [X] days."
+        assert "5-7" in execution._clean_proposal(text)
+
+    def test_removes_other_brackets(self):
+        text = "Using [specific technology] and [framework]."
+        result = execution._clean_proposal(text)
+        assert "[" not in result
+
+    def test_strips_whitespace(self):
+        text = "  \n  Hello world.  \n  "
+        assert execution._clean_proposal(text) == "Hello world."
+
+    def test_empty_string(self):
+        assert execution._clean_proposal("") == ""
+
+    def test_no_brackets(self):
+        text = "This is a clean proposal with no placeholders."
+        assert execution._clean_proposal(text) == text
+
+
+# --- _estimate_quote_price tests ---
+
+class TestEstimateQuotePrice:
+    def test_low_complexity(self):
+        req = execution.QuoteRequest(title="Fix typo", description="Small fix")
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["complexity"] == "low"
+        assert pricing["multiplier"] == 7.0
+        assert pricing["estimated_output_tokens"] == 2000
+        assert pricing["price"] > 0
+
+    def test_medium_complexity(self):
+        req = execution.QuoteRequest(
+            title="Build REST API",
+            description="x" * 600,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["complexity"] == "medium"
+        assert pricing["multiplier"] == 8.5
+
+    def test_high_complexity(self):
+        req = execution.QuoteRequest(
+            title="Full stack app",
+            description="x" * 2100,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["complexity"] == "high"
+        assert pricing["multiplier"] == 10.0
+
+    def test_high_budget_increases_multiplier(self):
+        req = execution.QuoteRequest(
+            title="Big project",
+            description="Details",
+            budget_max=600,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["multiplier"] > 7.0
+
+    def test_medium_budget_increases_multiplier(self):
+        req = execution.QuoteRequest(
+            title="Medium project",
+            description="Details",
+            budget_max=300,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["multiplier"] >= 7.0
+
+    def test_price_clamped_to_budget_max(self):
+        req = execution.QuoteRequest(
+            title="Tiny fix",
+            description="x" * 2500,
+            budget_max=10,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["price"] <= 10 * 1.1
+
+    def test_price_respects_budget_min(self):
+        req = execution.QuoteRequest(
+            title="Job",
+            description="task",
+            budget_min=100,
+            budget_max=500,
+        )
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["price"] >= 100 * 0.7
+
+    def test_minimum_quote_applied(self):
+        req = execution.QuoteRequest(title="A", description="B")
+        pricing = execution._estimate_quote_price(req)
+        assert pricing["price"] >= 5.0
+
+
+# --- /quote endpoint tests ---
+
+async def test_quote_simulation_mode(client):
+    resp = await client.post("/quote", json={
+        "title": "Build a chatbot",
+        "description": "Chatbot for customer support",
+        "platform": "freelancer",
+        "budget_min": 100,
+        "budget_max": 500,
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["mode"] == "simulation"
+    assert data["suggested_price"] > 0
+    assert "pricing" in data
+    assert "reply" in data
+
+
+async def test_quote_includes_pricing_metadata(client):
+    resp = await client.post("/quote", json={
+        "title": "Data pipeline",
+        "description": "Build an ETL pipeline for analytics",
+        "platform": "upwork",
+        "budget_max": 800,
+    })
+    data = resp.json()
+    pricing = data.get("pricing", {})
+    assert "complexity" in pricing
+    assert "multiplier" in pricing
+    assert "estimated_token_cost" in pricing
+
+
+async def test_quote_with_conversation(client):
+    resp = await client.post("/quote", json={
+        "title": "API Integration",
+        "description": "Connect to third-party API",
+        "platform": "freelancer",
+        "client_message": "Can you also add error handling?",
+        "conversation": [
+            {"role": "user", "content": "What's your timeline?"},
+            {"role": "assistant", "content": "5-7 business days."},
+        ],
+    })
+    data = resp.json()
+    assert data["ok"] == 1
