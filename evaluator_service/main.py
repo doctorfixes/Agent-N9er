@@ -85,6 +85,26 @@ def check_viability(title: str, description: str) -> str | None:
     return None
 
 
+_feedback_data = {}
+
+
+def _get_platform_win_rate(platform: str) -> float | None:
+    platform_stats = _feedback_data.get("by_platform", {}).get(platform)
+    if platform_stats and platform_stats.get("total", 0) >= 3:
+        return platform_stats.get("win_rate", None)
+    return None
+
+
+def _get_budget_bucket(budget_max: float) -> str:
+    if budget_max < 100:
+        return "micro"
+    elif budget_max < 500:
+        return "small"
+    elif budget_max < 2000:
+        return "medium"
+    return "large"
+
+
 async def _init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -165,6 +185,20 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
     else:
         viable = True
 
+    if viable and _feedback_data:
+        win_rate = _get_platform_win_rate(req.platform)
+        if win_rate is not None and win_rate < 0.05:
+            rejection = f"Historically low win rate ({win_rate:.0%}) on {req.platform}"
+            viable = False
+
+        bucket = _get_budget_bucket(req.budget_max)
+        bucket_stats = _feedback_data.get("by_budget", {}).get(bucket)
+        if bucket_stats and bucket_stats.get("total", 0) >= 5:
+            avg_rating = bucket_stats.get("avg_rating")
+            if avg_rating is not None and avg_rating < 2.5:
+                rejection = f"Low client ratings ({avg_rating:.1f}/5) in {bucket} budget range"
+                viable = False
+
     profit = quoted - cost_est.estimated_cost_usd if viable else 0
 
     result = EvaluationResult(
@@ -220,6 +254,22 @@ async def pricing():
                             "output_cost_per_m": v["output_cost_per_m"]}
                         for k, v in get_model_tiers().items()},
     }
+
+
+@app.post("/feedback/update")
+async def update_feedback(data: dict):
+    """Receive learning stats from the prospector to adjust evaluation strategy."""
+    global _feedback_data
+    _feedback_data = data
+    platforms = len(data.get("by_platform", {}))
+    buckets = len(data.get("by_budget", {}))
+    logger.info("Feedback updated: %d platforms, %d budget buckets", platforms, buckets)
+    return {"ok": 1, "platforms": platforms, "budget_buckets": buckets}
+
+
+@app.get("/feedback/current")
+async def current_feedback():
+    return {"has_feedback": bool(_feedback_data), "data": _feedback_data}
 
 
 if __name__ == "__main__":

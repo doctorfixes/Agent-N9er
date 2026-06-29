@@ -46,6 +46,13 @@ class ProposalRequest(BaseModel):
     tone: str = "professional"
 
 
+class RespondRequest(BaseModel):
+    prospect_id: str = ""
+    client_message: str
+    project_title: str = ""
+    project_description: str = ""
+
+
 @asynccontextmanager
 async def _get_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -694,3 +701,56 @@ def _format_html(output: str, task_id: str, row) -> str:
         f"<div class='content'><pre>{lines}</pre></div>"
         f"</div>"
     )
+
+
+@app.post("/respond")
+async def respond_to_client(req: RespondRequest):
+    """Generate a professional response to a client message."""
+    if not has_available_provider():
+        return {
+            "ok": 1,
+            "response": f"Thank you for your message regarding \"{req.project_title}\". "
+                        "I'll review your feedback and get back to you shortly with an update.",
+            "mode": "simulation",
+        }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are RJ, a professional freelancer responding to a client message. "
+                "Be professional, helpful, and concise. "
+                "If the client requests a revision, acknowledge it and confirm you'll work on it. "
+                "If they ask a question, answer clearly and directly. "
+                "Keep responses under 150 words. Sign off as 'RJ'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Project: {req.project_title}\n"
+                f"Project Description: {req.project_description[:500]}\n\n"
+                f"Client's message:\n{req.client_message}\n\n"
+                "Write a professional response to this client message."
+            ),
+        },
+    ]
+
+    try:
+        result = await complete(messages, tier="budget", max_tokens=512, temperature=0.4)
+        return {
+            "ok": 1,
+            "prospect_id": req.prospect_id,
+            "response": result.content.strip(),
+            "mode": "live",
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+        }
+    except Exception as e:
+        logger.error("Client response generation failed: %s", e)
+        return {
+            "ok": 1,
+            "response": f"Thank you for your message regarding \"{req.project_title}\". "
+                        "I'll review your feedback and get back to you shortly.",
+            "mode": "fallback",
+        }

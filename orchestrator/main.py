@@ -284,6 +284,28 @@ async def _scan_loop():
             await asyncio.sleep(60)
 
 
+async def _get_scan_platforms(client: httpx.AsyncClient, svc: dict) -> list[str]:
+    """Get platforms to scan — intersect SCAN_PLATFORMS with configured platforms from prospector."""
+    try:
+        resp = await client.get(f"{PROSPECTOR_URL}/platforms/configured", headers=svc)
+        resp.raise_for_status()
+        data = resp.json()
+        configured = set(data.get("configured", []))
+        active = [p for p in SCAN_PLATFORMS if p in configured]
+        skipped = [p for p in SCAN_PLATFORMS if p not in configured]
+        if skipped:
+            await _journal(
+                "platforms_skipped",
+                f"Skipped {len(skipped)} unconfigured platforms: {', '.join(skipped)}",
+                "Missing required credentials — configure tokens to enable",
+                {"skipped": skipped, "active": active},
+                outcome="info",
+            )
+        return active
+    except (httpx.RequestError, httpx.HTTPStatusError):
+        return list(SCAN_PLATFORMS)
+
+
 async def _run_scan_cycle():
     _scan_state["running"] = True
     svc = _svc_headers()
@@ -291,7 +313,10 @@ async def _run_scan_cycle():
     total_new = 0
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        for platform in SCAN_PLATFORMS:
+        active_platforms = await _get_scan_platforms(client, svc)
+        _scan_state["platforms"] = active_platforms
+
+        for platform in active_platforms:
             try:
                 resp = await client.post(
                     f"{PROSPECTOR_URL}/scan",
@@ -313,15 +338,16 @@ async def _run_scan_cycle():
     _scan_state["total_discovered"] += total_new
     _scan_state["last_results"] = results
 
+    scanned_count = len(active_platforms)
     failed_platforms = [p for p, r in results.items() if "error" in r]
     await _journal(
-        "scan_complete", f"Scanned {len(SCAN_PLATFORMS)} platforms, {total_new} new prospects",
-        f"Successful: {len(SCAN_PLATFORMS) - len(failed_platforms)}, "
+        "scan_complete", f"Scanned {scanned_count} platforms, {total_new} new prospects",
+        f"Successful: {scanned_count - len(failed_platforms)}, "
         f"Failed: {failed_platforms if failed_platforms else 'none'}",
         {"results": results, "total_new": total_new},
         outcome="ok" if not failed_platforms else "partial",
     )
-    logger.info("Scan cycle complete: %d platforms, %d new prospects", len(SCAN_PLATFORMS), total_new)
+    logger.info("Scan cycle complete: %d platforms, %d new prospects", scanned_count, total_new)
     return results
 
 
@@ -375,6 +401,28 @@ async def _dispatch_cycle():
                     stats["approved"] += 1
                     evaluation = eval_data.get("evaluation", {})
                     quoted_price = evaluation.get("quoted_price_usd", 0)
+
+                    # 2b. Get adaptive pricing
+                    try:
+                        price_resp = await client.get(
+                            f"{PROSPECTOR_URL}/bids/optimal-price",
+                            params={"platform": prospect.get("platform", ""),
+                                    "budget_max": prospect.get("budget_max", 0)},
+                            headers=svc,
+                        )
+                        price_resp.raise_for_status()
+                        price_data = price_resp.json()
+                        adaptive_price = price_data.get("amount", 0)
+                        if adaptive_price > 0 and price_data.get("source") != "default":
+                            await _journal(
+                                "adaptive_pricing",
+                                f"Using learned price ${adaptive_price:.2f} (ratio {price_data.get('ratio', '?')}) instead of ${quoted_price:.2f}",
+                                f"Source: {price_data.get('source')}, Win rate: {price_data.get('win_rate', '?')}, Samples: {price_data.get('samples', 0)}",
+                                price_data, outcome="ok",
+                            )
+                            quoted_price = adaptive_price
+                    except (httpx.RequestError, httpx.HTTPStatusError):
+                        pass
 
                     # 3. Generate proposal
                     proposal_text = ""
@@ -588,12 +636,74 @@ async def _posthire_cycle():
                 stats["errors"] += 1
                 logger.warning("Review check failed: %s", e)
 
+            # 5. Update feedback loop (feed learning stats to evaluator)
+            if stats.get("reviews", 0) > 0 or stats.get("newly_hired", 0) > 0:
+                try:
+                    fb_resp = await client.get(f"{PROSPECTOR_URL}/feedback/stats", headers=svc)
+                    fb_resp.raise_for_status()
+                    feedback = fb_resp.json()
+                    try:
+                        await client.post(
+                            f"{EVALUATOR_URL}/feedback/update",
+                            json=feedback, headers=svc,
+                        )
+                        await _journal(
+                            "feedback_updated", "Evaluator feedback updated",
+                            f"Platforms: {len(feedback.get('by_platform', {}))}, "
+                            f"Budget buckets: {len(feedback.get('by_budget', {}))}",
+                            outcome="ok",
+                        )
+                    except (httpx.RequestError, httpx.HTTPStatusError):
+                        pass
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    logger.warning("Feedback stats fetch failed: %s", e)
+
+            # 6. Check client messages and auto-respond
+            try:
+                msg_resp = await client.post(f"{PROSPECTOR_URL}/prospects/check-messages", headers=svc)
+                msg_resp.raise_for_status()
+                msg_data = msg_resp.json()
+                stats["messages_found"] = msg_data.get("new_messages", 0)
+
+                for pm in msg_data.get("prospects_with_messages", []):
+                    if pm.get("message_type") in ("revision", "question") and _is_service_up("execution"):
+                        try:
+                            respond_resp = await client.post(
+                                f"{EXECUTION_URL}/respond",
+                                json={
+                                    "prospect_id": pm["prospect_id"],
+                                    "client_message": pm.get("preview", ""),
+                                    "project_title": pm.get("title", ""),
+                                },
+                                headers=svc,
+                            )
+                            respond_resp.raise_for_status()
+                            response_text = respond_resp.json().get("response", "")
+
+                            if response_text:
+                                await client.post(
+                                    f"{PROSPECTOR_URL}/prospects/{pm['prospect_id']}/reply",
+                                    json={"message": response_text, "thread_id": pm.get("thread_id", "")},
+                                    headers=svc,
+                                )
+                                stats["auto_replies"] = stats.get("auto_replies", 0) + 1
+                                await _journal(
+                                    "auto_reply", f"Auto-replied to client: {pm['title'][:50]}",
+                                    f"Type: {pm['message_type']}, Preview: {pm.get('preview', '')[:80]}",
+                                    outcome="ok",
+                                )
+                        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                            logger.warning("Auto-reply failed for %s: %s", pm["prospect_id"][:8], e)
+
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.warning("Message check failed: %s", e)
+
     except Exception as e:
         stats["errors"] += 1
         await _journal("posthire_error", "Post-hire cycle failed",
                        str(e), severity="error", outcome="error")
 
-    if any(stats[k] > 0 for k in ("newly_hired", "executed", "payments", "reviews")):
+    if any(stats[k] > 0 for k in ("newly_hired", "executed", "payments", "reviews", "messages_found")):
         await _journal(
             "posthire_complete",
             f"Post-hire: {stats['newly_hired']} hired, {stats['executed']} executed, {stats['payments']} paid",

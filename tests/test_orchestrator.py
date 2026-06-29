@@ -180,12 +180,19 @@ async def test_scan_status_endpoint(client):
 
 async def test_trigger_scan_calls_prospector(client):
     scan_resp = _make_response({"ok": 1, "discovered": 3, "new": 2, "platform": "upwork"})
+    configured_resp = _make_response({"configured": list(orch.SCAN_PLATFORMS), "skipped": []})
 
     async def mock_post(url, **kwargs):
         return scan_resp
 
+    async def mock_get(url, **kwargs):
+        if "configured" in url:
+            return configured_resp
+        return _make_response({})
+
     mock_client = AsyncMock()
     mock_client.post = mock_post
+    mock_client.get = mock_get
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
