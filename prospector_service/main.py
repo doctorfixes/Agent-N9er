@@ -1258,7 +1258,7 @@ async def submit_bid(prospect_id: str, bid: BidSubmission):
 
 @app.get("/bids/pending")
 async def list_pending_bids():
-    return list(_pending_bids.values()) if _pending_bids else []
+    return [{"bid_id": bid_id, **data} for bid_id, data in _pending_bids.items()]
 
 
 @app.post("/bids/{bid_id}/approve")
