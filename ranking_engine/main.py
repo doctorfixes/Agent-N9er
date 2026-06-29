@@ -61,8 +61,10 @@ async def _get_profitability() -> dict:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{BILLING_URL}/profitability")
             resp.raise_for_status()
-            _profitability_cache = resp.json()
-            _cache_expires_at = now + 300
+            data = resp.json()
+            if isinstance(data, dict):
+                _profitability_cache = data
+                _cache_expires_at = now + 300
     except Exception as e:
         logger.debug("Profitability fetch failed (using cache): %s", e)
     return _profitability_cache
