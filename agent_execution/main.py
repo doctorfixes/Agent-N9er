@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import random
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -427,10 +428,11 @@ async def generate_proposal(req: ProposalRequest):
 
     try:
         result = await complete(messages, tier="budget", max_tokens=1024, temperature=0.5)
+        cleaned = _clean_proposal(result.content)
         return {
             "ok": 1,
             "prospect_id": req.prospect_id,
-            "proposal": result.content,
+            "proposal": cleaned,
             "mode": "live",
             "model": result.model,
             "cost_usd": result.cost_usd,
@@ -439,6 +441,15 @@ async def generate_proposal(req: ProposalRequest):
     except Exception as e:
         logger.error("Proposal generation failed: %s", e)
         return _simulated_proposal(req)
+
+
+def _clean_proposal(text: str) -> str:
+    text = re.sub(r"Dear \[.*?\],?\n?", "", text)
+    text = re.sub(r"\[Client(?:\s+Name)?\]", "you", text)
+    text = re.sub(r"\[Your Name\]", "Agent N9er", text)
+    text = re.sub(r"\[X\]", "5-7", text)
+    text = re.sub(r"\[.*?\]", "", text)
+    return text.strip()
 
 
 def _simulated_proposal(req: ProposalRequest) -> dict:
