@@ -83,6 +83,7 @@ export default function ProspectsPage() {
   const [proposalTarget, setProposalTarget] = useState(null);
   const [executing, setExecuting] = useState(false);
   const [execResult, setExecResult] = useState(null);
+  const [unsticking, setUnsticking] = useState(false);
 
   const { data: prospects, mutate } = useSWR("/api/prospects" + (statusFilter ? `?status=${statusFilter}` : ""), fetcher, { refreshInterval: 10000 });
   const { data: stats } = useSWR("/api/prospects/stats", fetcher, { refreshInterval: 15000 });
@@ -168,6 +169,24 @@ export default function ProspectsPage() {
           </button>
           <button className="cmd-btn primary" onClick={handleExecuteWork} disabled={executing} style={{ marginLeft: 8 }}>
             {executing ? "Working..." : "Execute Work"}
+          </button>
+          <button className="cmd-btn" onClick={async () => {
+            setUnsticking(true);
+            try {
+              const resp = await fetch("/api/prospects/unstick", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ target_status: "approved" }),
+              });
+              const data = await resp.json();
+              setExecResult({ detail: `Reset ${data.reset || 0} of ${data.found || 0} stuck prospects to approved` });
+              mutate();
+            } catch (e) {
+              setExecResult({ error: e.message });
+            }
+            setUnsticking(false);
+          }} disabled={unsticking}>
+            {unsticking ? "..." : "Unstick"}
           </button>
         </div>
       </div>

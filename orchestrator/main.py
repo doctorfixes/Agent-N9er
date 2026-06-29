@@ -873,11 +873,27 @@ async def execute_prospect_work(req: ExecuteWorkRequest):
                         results["failed"] += 1
                         entry["status"] = "execution_failed"
                         entry["error"] = exec_data.get("error", "LLM returned incomplete response")
+                        try:
+                            await client.patch(
+                                f"{PROSPECTOR_URL}/prospects/{pid}",
+                                json={"status": "approved"},
+                                headers=svc,
+                            )
+                        except httpx.RequestError:
+                            pass
 
                 except (httpx.RequestError, httpx.HTTPStatusError) as e:
                     results["failed"] += 1
                     entry["status"] = "error"
                     entry["error"] = str(e)
+                    try:
+                        await client.patch(
+                            f"{PROSPECTOR_URL}/prospects/{pid}",
+                            json={"status": "approved"},
+                            headers=svc,
+                        )
+                    except httpx.RequestError:
+                        pass
 
                 results["deliverables"].append(entry)
 
@@ -890,3 +906,44 @@ async def execute_prospect_work(req: ExecuteWorkRequest):
         results["total"], results["completed"], results["failed"], results["total_cost_usd"],
     )
     return results
+
+
+class UnstickRequest(BaseModel):
+    target_status: str = "approved"
+
+
+@app.post("/prospects/unstick")
+async def unstick_prospects(req: UnstickRequest):
+    """Reset stuck 'executing' prospects back to a recoverable status."""
+    svc = _svc_headers()
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "executing", "limit": 100},
+                headers=svc,
+            )
+            resp.raise_for_status()
+            stuck = resp.json()
+
+            reset_count = 0
+            for prospect in stuck:
+                pid = prospect["id"]
+                try:
+                    await client.patch(
+                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                        json={"status": req.target_status},
+                        headers=svc,
+                    )
+                    reset_count += 1
+                except (httpx.RequestError, httpx.HTTPStatusError):
+                    pass
+
+            return {
+                "ok": 1,
+                "found": len(stuck),
+                "reset": reset_count,
+                "target_status": req.target_status,
+            }
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Service unreachable: {e}")

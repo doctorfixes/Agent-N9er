@@ -851,3 +851,121 @@ async def test_dispatch_handles_service_error(client):
     data = resp.json()
     assert data["ok"] == 1
     assert data["dispatch"]["errors"] >= 1
+
+
+# --- Unstick tests ---
+
+async def test_unstick_resets_stuck_prospects(client):
+    """Unstick endpoint resets 'executing' prospects back to 'approved'."""
+    stuck = [
+        {"id": "stuck1", "title": "Stuck A", "status": "executing"},
+        {"id": "stuck2", "title": "Stuck B", "status": "executing"},
+    ]
+    patch_calls = []
+
+    async def mock_get(url, **kwargs):
+        if "prospects" in url:
+            return _make_response(stuck)
+        return _make_response({})
+
+    async def mock_patch(url, **kwargs):
+        patch_calls.append(url)
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/prospects/unstick", json={})
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["found"] == 2
+    assert data["reset"] == 2
+    assert data["target_status"] == "approved"
+    assert len(patch_calls) == 2
+
+
+async def test_unstick_no_stuck_prospects(client):
+    """Unstick returns zeros when nothing is stuck."""
+    async def mock_get(url, **kwargs):
+        return _make_response([])
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/prospects/unstick", json={})
+
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["found"] == 0
+    assert data["reset"] == 0
+
+
+async def test_execute_work_rolls_back_on_failure(client):
+    """Execute-work resets prospect to 'approved' when execution fails."""
+    prospects = [{"id": "rb1", "title": "Rollback test", "status": "executing"}]
+    exec_resp = _make_response({"ok": 1, "success": False, "mode": "simulation"})
+    patch_calls = []
+
+    async def mock_get(url, **kwargs):
+        return _make_response(prospects)
+
+    async def mock_post(url, **kwargs):
+        return exec_resp
+
+    async def mock_patch(url, **kwargs):
+        patch_calls.append(kwargs.get("json", {}))
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = mock_post
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/prospects/execute-work", json={"status_filter": "executing"})
+
+    data = resp.json()
+    assert data["failed"] == 1
+    assert any(p.get("status") == "approved" for p in patch_calls)
+
+
+async def test_execute_work_rolls_back_on_service_error(client):
+    """Execute-work resets prospect to 'approved' when execution service is unreachable."""
+    import httpx as httpx_lib
+
+    prospects = [{"id": "rb2", "title": "Unreachable test", "status": "executing"}]
+    patch_calls = []
+
+    async def mock_get(url, **kwargs):
+        return _make_response(prospects)
+
+    async def mock_post(url, **kwargs):
+        raise httpx_lib.ConnectError("Connection refused")
+
+    async def mock_patch(url, **kwargs):
+        patch_calls.append(kwargs.get("json", {}))
+        return _make_response({"ok": 1})
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = mock_post
+    mock_client.patch = mock_patch
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        resp = await client.post("/prospects/execute-work", json={"status_filter": "executing"})
+
+    data = resp.json()
+    assert data["failed"] == 1
+    assert any(p.get("status") == "approved" for p in patch_calls)
