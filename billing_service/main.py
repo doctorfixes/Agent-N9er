@@ -13,6 +13,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.events import emit, EVENT_INVOICE_CREATED
+
+os.environ.setdefault("SERVICE_NAME", "billing")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("billing")
@@ -153,6 +156,14 @@ async def create_invoice(req: InvoiceRequest) -> InvoiceRecord:
         "Invoice %s created: $%.2f for %s (profit $%.2f)",
         invoice_id, req.amount_usd, req.prospect_id, profit,
     )
+
+    await emit(EVENT_INVOICE_CREATED, {
+        "invoice_id": invoice_id,
+        "prospect_id": req.prospect_id,
+        "amount_usd": req.amount_usd,
+        "profit_usd": profit,
+        "platform": req.platform,
+    })
 
     return InvoiceRecord(
         invoice_id=invoice_id, prospect_id=req.prospect_id,

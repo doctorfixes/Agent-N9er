@@ -23,6 +23,16 @@ from shared.config import (
     CORS_ORIGINS,
 )
 from shared.retry import retry_post
+from shared.events import (
+    emit, subscribe, get_recent_events,
+    EVENT_TASK_PUBLISHED, EVENT_TASK_AWARDED,
+    EVENT_EXECUTION_COMPLETED, EVENT_EXECUTION_FAILED,
+    EVENT_REPUTATION_UPDATED, EVENT_PROSPECT_DISCOVERED,
+    EVENT_PROSPECT_APPROVED, EVENT_SCAN_COMPLETED,
+    EVENT_AGENT_REGISTERED,
+)
+
+os.environ.setdefault("SERVICE_NAME", "orchestrator")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -238,6 +248,13 @@ async def register_agent(agent: AgentRegisterRequest):
         pass
     logger.info("Registered agent %s (%s, specialization=%s)",
                 agent.agent_id, agent.profile, agent.specialization)
+
+    await emit(EVENT_AGENT_REGISTERED, {
+        "agent_id": agent.agent_id,
+        "specialization": agent.specialization,
+        "profile": agent.profile,
+    }, relay=False)
+
     return {"ok": 1, "agent_id": agent.agent_id}
 
 
@@ -293,6 +310,14 @@ async def pipeline(task: dict):
             logger.info("Task %s published with priority %.2f [%s/%s]",
                         ranked["id"], ranked["priority_score"],
                         normalized.get("category", "?"), normalized.get("tier", "?"))
+
+            await emit(EVENT_TASK_PUBLISHED, {
+                "task_id": ranked["id"],
+                "priority_score": ranked["priority_score"],
+                "category": normalized.get("category", ""),
+                "source": normalized.get("source", "manual"),
+            }, relay=False)
+
             return {
                 "status": "task_published",
                 "task_id": ranked["id"],
@@ -556,4 +581,180 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
         results["scanned"], results["evaluated"], results["approved"],
         results["executed"], results["invoiced"], results["estimated_profit"],
     )
+
+    await emit(EVENT_SCAN_COMPLETED, {
+        "platform": req.platform,
+        "scanned": results["scanned"],
+        "approved": results["approved"],
+        "executed": results["executed"],
+        "profit": results["estimated_profit"],
+    }, relay=False)
+
     return results
+
+
+# ---------------------------------------------------------------------------
+# Event relay and feedback loops
+# ---------------------------------------------------------------------------
+
+_event_subscribers: dict[str, list[str]] = {}
+_pipeline_stats = {
+    "events_relayed": 0,
+    "feedback_loops_triggered": 0,
+    "auto_rescans_triggered": 0,
+    "confidence_recalibrations": 0,
+}
+
+
+@app.post("/events/relay")
+async def relay_event(event: dict):
+    event_type = event.get("type", "")
+    _pipeline_stats["events_relayed"] += 1
+
+    for handler in _local_event_handlers.get(event_type, []):
+        try:
+            await handler(event.get("data", {}))
+        except Exception as e:
+            logger.error("Relay handler error for %s: %s", event_type, e)
+
+    subscriber_urls = _event_subscribers.get(event_type, []) + _event_subscribers.get("*", [])
+    for url in subscriber_urls:
+        asyncio.create_task(_forward_event(url, event))
+
+    logger.info("Relayed event %s from %s", event_type, event.get("source", "?"))
+    return {"ok": 1}
+
+
+async def _forward_event(url: str, event: dict):
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(url, json=event, headers=_svc_headers())
+    except Exception as e:
+        logger.debug("Event forward failed to %s: %s", url, e)
+
+
+@app.post("/events/subscribe")
+async def subscribe_events(payload: dict):
+    event_type = payload.get("event_type", "*")
+    callback_url = payload.get("callback_url", "")
+    if not callback_url:
+        raise HTTPException(status_code=422, detail="callback_url required")
+    _event_subscribers.setdefault(event_type, [])
+    if callback_url not in _event_subscribers[event_type]:
+        _event_subscribers[event_type].append(callback_url)
+    return {"ok": 1, "subscribed": event_type, "callback_url": callback_url}
+
+
+@app.get("/events/subscriptions")
+async def list_subscriptions():
+    return _event_subscribers
+
+
+@app.get("/events/recent")
+async def recent_events(limit: int = 50, event_type: str = None):
+    return get_recent_events(limit=limit, event_type=event_type)
+
+
+@app.get("/events/stats")
+async def event_stats():
+    return _pipeline_stats
+
+
+# ---------------------------------------------------------------------------
+# Feedback loop handlers — these create the self-reinforcing cycle
+# ---------------------------------------------------------------------------
+
+_local_event_handlers: dict[str, list] = {}
+
+
+def _on_event(event_type: str):
+    def decorator(fn):
+        _local_event_handlers.setdefault(event_type, []).append(fn)
+        return fn
+    return decorator
+
+
+@_on_event(EVENT_EXECUTION_COMPLETED)
+async def _on_execution_success(data: dict):
+    """When execution succeeds, bump agent confidence in local registry
+    so future bids are stronger — a positive feedback loop."""
+    agent_id = data.get("agent_id")
+    if not agent_id:
+        return
+    async with _agents_lock:
+        agent = registered_agents.get(agent_id)
+        if agent:
+            old = agent["confidence"]
+            agent["confidence"] = min(1.0, old + 0.005)
+            _pipeline_stats["confidence_recalibrations"] += 1
+            logger.info("Confidence bump: %s %.3f → %.3f (execution success)",
+                        agent_id, old, agent["confidence"])
+
+
+@_on_event(EVENT_EXECUTION_FAILED)
+async def _on_execution_failure(data: dict):
+    """When execution fails, reduce agent confidence so the marketplace
+    naturally routes future work to more reliable agents."""
+    agent_id = data.get("agent_id")
+    if not agent_id:
+        return
+    async with _agents_lock:
+        agent = registered_agents.get(agent_id)
+        if agent:
+            old = agent["confidence"]
+            agent["confidence"] = max(0.1, old - 0.01)
+            _pipeline_stats["confidence_recalibrations"] += 1
+            logger.info("Confidence drop: %s %.3f → %.3f (execution failure)",
+                        agent_id, old, agent["confidence"])
+
+
+@_on_event(EVENT_REPUTATION_UPDATED)
+async def _on_reputation_change(data: dict):
+    """When reputation changes, sync the score back into the local agent
+    registry. High-reputation agents win more bids → more executions →
+    more reputation data. This is the core momentum cycle."""
+    agent_id = data.get("agent_id")
+    score = data.get("score")
+    if not agent_id or score is None:
+        return
+    async with _agents_lock:
+        agent = registered_agents.get(agent_id)
+        if agent:
+            agent["confidence"] = round((agent["confidence"] + score) / 2, 4)
+            _pipeline_stats["feedback_loops_triggered"] += 1
+            logger.info("Reputation sync: %s confidence=%.3f (score=%.3f)",
+                        agent_id, agent["confidence"], score)
+
+
+@_on_event(EVENT_SCAN_COMPLETED)
+async def _on_scan_completed(data: dict):
+    """When a scan finds approved prospects, log the momentum signal.
+    More successful executions → better reputation → more aggressive
+    scanning makes economic sense."""
+    approved = data.get("approved", 0)
+    if approved > 0:
+        _pipeline_stats["auto_rescans_triggered"] += 1
+        logger.info("Scan momentum: %d approved prospects ready for pipeline", approved)
+
+
+@app.get("/pipeline/momentum")
+async def pipeline_momentum():
+    """Dashboard endpoint showing the health of the feedback cycle."""
+    async with _agents_lock:
+        agents_snapshot = dict(registered_agents)
+
+    avg_confidence = 0.0
+    if agents_snapshot:
+        avg_confidence = round(
+            sum(a.get("confidence", 0.5) for a in agents_snapshot.values()) / len(agents_snapshot), 3
+        )
+
+    return {
+        "agent_count": len(agents_snapshot),
+        "avg_confidence": avg_confidence,
+        "events_relayed": _pipeline_stats["events_relayed"],
+        "feedback_loops_triggered": _pipeline_stats["feedback_loops_triggered"],
+        "confidence_recalibrations": _pipeline_stats["confidence_recalibrations"],
+        "auto_rescans_triggered": _pipeline_stats["auto_rescans_triggered"],
+        "recent_events": get_recent_events(limit=10),
+    }

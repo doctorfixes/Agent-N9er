@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.events import emit, EVENT_PROSPECT_DISCOVERED, EVENT_PROSPECT_APPROVED
+
+os.environ.setdefault("SERVICE_NAME", "prospector")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("prospector")
@@ -300,6 +303,15 @@ async def scan(req: ScanRequest):
         logger.info("Auto-evaluated %d/%d new prospects", evaluated, len(new_prospects))
 
     logger.info("Scan complete: %d discovered, %d new on %s", len(prospects), saved, req.platform)
+
+    if saved > 0:
+        await emit(EVENT_PROSPECT_DISCOVERED, {
+            "platform": req.platform,
+            "new_count": saved,
+            "total_scanned": len(prospects),
+            "high_value_count": len(high_value) if high_value else 0,
+        })
+
     return {"ok": 1, "discovered": len(prospects), "new": saved, "platform": req.platform}
 
 
@@ -1031,6 +1043,13 @@ async def _auto_evaluate_batch(prospects: list[dict]) -> int:
                 )
                 await db.commit()
             evaluated += 1
+            if new_status == "approved":
+                await emit(EVENT_PROSPECT_APPROVED, {
+                    "prospect_id": p["id"],
+                    "title": p.get("title", ""),
+                    "platform": p.get("platform", ""),
+                    "quoted_price": evaluation.get("quoted_price_usd", 0),
+                })
         except Exception as e:
             logger.warning("Auto-evaluate failed for %s: %s", p["id"][:8], e)
     return evaluated
