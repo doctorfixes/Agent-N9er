@@ -359,6 +359,7 @@ async def _execute_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict
                 "description": prospect.get("description", ""),
             },
             headers=svc,
+            timeout=120.0,
         )
         exec_resp.raise_for_status()
         exec_data = exec_resp.json()
