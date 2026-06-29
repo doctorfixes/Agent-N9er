@@ -416,3 +416,37 @@ async def test_quote_with_conversation(client):
     })
     data = resp.json()
     assert data["ok"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Client response generation
+# ---------------------------------------------------------------------------
+
+async def test_respond_simulation_mode(client):
+    resp = await client.post("/respond", json={
+        "prospect_id": "test-p1",
+        "client_message": "Please revise the header layout",
+        "project_title": "Website Redesign",
+        "project_description": "Redesigning the homepage",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+    assert data["mode"] in ("simulation", "live", "fallback")
+    assert len(data["response"]) > 0
+
+async def test_respond_includes_project_title(client):
+    resp = await client.post("/respond", json={
+        "prospect_id": "test-p2",
+        "client_message": "How is progress going?",
+        "project_title": "Dashboard App",
+        "project_description": "",
+    })
+    data = resp.json()
+    assert data["ok"] == 1
+
+async def test_respond_missing_message_returns_422(client):
+    resp = await client.post("/respond", json={
+        "prospect_id": "test-p3",
+        "project_title": "Test",
+    })
+    assert resp.status_code == 422

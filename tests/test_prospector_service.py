@@ -22,6 +22,8 @@ async def reset_db():
     try:
         async with aiosqlite.connect(prospector.DB_PATH) as db:
             await db.execute("DELETE FROM prospects")
+            await db.execute("DELETE FROM bid_history")
+            await db.execute("DELETE FROM client_messages")
             await db.commit()
     except Exception:
         pass
@@ -2281,3 +2283,238 @@ class TestSubmitDeliverable:
             assert resp.status_code == 503
         finally:
             prospector.FREELANCER_TOKEN = original_token
+
+
+# ---------------------------------------------------------------------------
+# Adaptive learning: configured platforms
+# ---------------------------------------------------------------------------
+
+class TestConfiguredPlatforms:
+    async def test_configured_endpoint_returns_lists(self, client):
+        resp = await client.get("/platforms/configured")
+        data = resp.json()
+        assert "configured" in data
+        assert "skipped" in data
+        assert "total" in data
+        assert isinstance(data["configured"], list)
+
+    async def test_freelancer_configured_with_token(self, client):
+        original = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = "test-token"
+        try:
+            resp = await client.get("/platforms/configured")
+            assert "freelancer" in resp.json()["configured"]
+        finally:
+            prospector.FREELANCER_TOKEN = original
+
+    async def test_github_skipped_without_token(self, client):
+        original = prospector.GITHUB_TOKEN
+        prospector.GITHUB_TOKEN = ""
+        try:
+            resp = await client.get("/platforms/configured")
+            data = resp.json()
+            assert "github_bounties" not in data["configured"]
+            assert "github_bounties" in data["skipped"]
+        finally:
+            prospector.GITHUB_TOKEN = original
+
+    async def test_platforms_endpoint_includes_configured_field(self, client):
+        resp = await client.get("/platforms")
+        data = resp.json()
+        for p in data:
+            assert "configured" in p
+
+
+# ---------------------------------------------------------------------------
+# Adaptive learning: bid history & analytics
+# ---------------------------------------------------------------------------
+
+class TestBidAnalytics:
+    async def test_analytics_empty(self, client):
+        resp = await client.get("/bids/analytics")
+        data = resp.json()
+        assert data["by_platform"] == {}
+        assert data["by_ratio"] == {}
+
+    async def test_record_and_analytics(self, client):
+        await prospector._record_bid("p1", "freelancer", 350, 0, 500, "python")
+        await prospector._update_bid_outcome("p1", "won")
+        await prospector._record_bid("p2", "freelancer", 400, 0, 500, "python")
+        await prospector._update_bid_outcome("p2", "lost")
+
+        resp = await client.get("/bids/analytics")
+        data = resp.json()
+        fl = data["by_platform"]["freelancer"]
+        assert fl["total"] == 2
+        assert fl["wins"] == 1
+        assert fl["losses"] == 1
+        assert fl["win_rate"] == 0.5
+
+    async def test_ratio_buckets(self, client):
+        await prospector._record_bid("r1", "freelancer", 100, 0, 500, "")
+        await prospector._update_bid_outcome("r1", "won")
+        await prospector._record_bid("r2", "freelancer", 450, 0, 500, "")
+        await prospector._update_bid_outcome("r2", "lost")
+
+        resp = await client.get("/bids/analytics")
+        data = resp.json()
+        assert len(data["by_ratio"]) > 0
+
+
+class TestOptimalPrice:
+    async def test_default_with_no_history(self, client):
+        resp = await client.get("/bids/optimal-price", params={"platform": "freelancer", "budget_max": 1000})
+        data = resp.json()
+        assert data["source"] == "default"
+        assert data["ratio"] == 0.7
+        assert data["amount"] == 700
+
+    async def test_learned_ratio_with_enough_samples(self, client):
+        for i in range(5):
+            await prospector._record_bid(f"w{i}", "freelancer", 400, 0, 500, "")
+            await prospector._update_bid_outcome(f"w{i}", "won")
+
+        resp = await client.get("/bids/optimal-price", params={"platform": "freelancer", "budget_max": 1000})
+        data = resp.json()
+        assert data["source"] == "learned"
+        assert data["samples"] >= 5
+        assert 0.15 <= data["ratio"] <= 0.95
+        assert data["amount"] > 0
+
+    async def test_zero_budget_returns_zero_amount(self, client):
+        resp = await client.get("/bids/optimal-price", params={"platform": "freelancer", "budget_max": 0})
+        data = resp.json()
+        assert data["amount"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Adaptive learning: feedback stats
+# ---------------------------------------------------------------------------
+
+class TestFeedbackStats:
+    async def test_empty_stats(self, client):
+        resp = await client.get("/feedback/stats")
+        data = resp.json()
+        assert data["by_platform"] == {}
+        assert data["by_budget"] == {}
+        assert data["by_skills"] == []
+
+    async def test_stats_with_data(self, client):
+        await prospector._save_prospect({
+            "id": "fs1", "platform": "freelancer", "platform_job_id": "fs-j1",
+            "title": "Test", "description": "", "budget_min": 0,
+            "budget_max": 300, "status": "hired", "skills": "python",
+        })
+        await prospector._save_prospect({
+            "id": "fs2", "platform": "freelancer", "platform_job_id": "fs-j2",
+            "title": "Test2", "description": "", "budget_min": 0,
+            "budget_max": 300, "status": "rejected", "skills": "python",
+        })
+
+        resp = await client.get("/feedback/stats")
+        data = resp.json()
+        fl = data["by_platform"]["freelancer"]
+        assert fl["total"] == 2
+        assert fl["wins"] == 1
+        assert fl["rejections"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Client communication: classify message
+# ---------------------------------------------------------------------------
+
+class TestClassifyMessage:
+    def test_revision_detected(self):
+        assert prospector._classify_message("Please revise the homepage") == "revision"
+
+    def test_question_detected(self):
+        assert prospector._classify_message("How is the project going?") == "question"
+
+    def test_question_mark_detected(self):
+        assert prospector._classify_message("Is it done?") == "question"
+
+    def test_general_fallback(self):
+        assert prospector._classify_message("Great work, thanks!") == "general"
+
+    def test_revision_takes_priority(self):
+        assert prospector._classify_message("Can you revise the header? How does it look?") == "revision"
+
+
+# ---------------------------------------------------------------------------
+# Client communication: check messages endpoint
+# ---------------------------------------------------------------------------
+
+class TestCheckMessages:
+    async def test_no_credentials(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = ""
+        prospector.FREELANCER_ID = ""
+        try:
+            resp = await client.post("/prospects/check-messages")
+            data = resp.json()
+            assert data["ok"] == 0
+            assert data["checked"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+    async def test_no_active_prospects(self, client):
+        original_token = prospector.FREELANCER_TOKEN
+        original_id = prospector.FREELANCER_ID
+        prospector.FREELANCER_TOKEN = "test-token"
+        prospector.FREELANCER_ID = "12345"
+        try:
+            resp = await client.post("/prospects/check-messages")
+            data = resp.json()
+            assert data["ok"] == 1
+            assert data["checked"] == 0
+        finally:
+            prospector.FREELANCER_TOKEN = original_token
+            prospector.FREELANCER_ID = original_id
+
+
+# ---------------------------------------------------------------------------
+# Client communication: messages & reply endpoints
+# ---------------------------------------------------------------------------
+
+class TestClientMessages:
+    async def test_get_messages_empty(self, client):
+        resp = await client.get("/prospects/nonexistent/messages")
+        assert resp.json() == []
+
+    async def test_reply_prospect_not_found(self, client):
+        resp = await client.post("/prospects/nonexistent/reply", json={
+            "message": "Hello", "thread_id": "123",
+        })
+        assert resp.status_code == 404
+
+    async def test_reply_missing_fields(self, client):
+        await prospector._save_prospect({
+            "id": "cm1", "platform": "freelancer", "platform_job_id": "fl-cm1",
+            "title": "Test", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "hired",
+        })
+        original = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = "test-token"
+        try:
+            resp = await client.post("/prospects/cm1/reply", json={"message": "", "thread_id": ""})
+            assert resp.status_code == 400
+        finally:
+            prospector.FREELANCER_TOKEN = original
+
+    async def test_reply_no_token(self, client):
+        await prospector._save_prospect({
+            "id": "cm2", "platform": "freelancer", "platform_job_id": "fl-cm2",
+            "title": "Test", "description": "", "budget_min": 0,
+            "budget_max": 100, "status": "hired",
+        })
+        original = prospector.FREELANCER_TOKEN
+        prospector.FREELANCER_TOKEN = ""
+        try:
+            resp = await client.post("/prospects/cm2/reply", json={
+                "message": "Hello", "thread_id": "123",
+            })
+            assert resp.status_code == 503
+        finally:
+            prospector.FREELANCER_TOKEN = original
