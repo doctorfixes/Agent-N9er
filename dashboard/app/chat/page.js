@@ -142,9 +142,12 @@ export default function ChatPage() {
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         }]);
       } else {
+        const platformName = data.platform === "github_bounties" ? "GitHub Bounty" : "Freelancer";
         const statusLabel = data.status === "pending_approval"
-          ? `Bid pending approval (ID: ${data.bid_id?.substring(0, 8)}). Amount: $${data.amount}. Approve below or via Prospects page.`
-          : `Bid submitted: $${data.amount} on project ${data.project_id}`;
+          ? `${platformName} bid pending approval (ID: ${data.bid_id?.substring(0, 8)}). Amount: $${data.amount}. Approve below or via Prospects page.`
+          : data.platform === "github_bounties"
+            ? `Comment posted on GitHub issue ${data.issue}: $${data.amount}`
+            : `Bid submitted: $${data.amount} on project ${data.project_id}`;
         setMessages((prev) => [...prev, {
           role: "system",
           content: statusLabel,
@@ -185,9 +188,12 @@ export default function ChatPage() {
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         }]);
       } else {
+        const platformLabel = data.platform === "github_bounties"
+          ? `GitHub issue ${data.issue}${data.comment_url ? ` — ${data.comment_url}` : ""}`
+          : `Freelancer project ${data.project_id}`;
         setMessages((prev) => [...prev, {
           role: "system",
-          content: `Bid approved and submitted to Freelancer: $${data.amount} on project ${data.project_id}`,
+          content: `Bid approved and submitted to ${platformLabel}: $${data.amount}`,
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         }]);
         setSelectedProspect((prev) => prev ? { ...prev, status: "applied", bid_status: "submitted" } : prev);

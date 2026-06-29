@@ -1216,17 +1216,23 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
 _pending_bids = {}
 
 
+SUPPORTED_BID_PLATFORMS = {"freelancer", "github_bounties"}
+
+
 @app.post("/prospects/{prospect_id}/bid")
 async def submit_bid(prospect_id: str, bid: BidSubmission):
     prospect = await _get_prospect(prospect_id)
     if not prospect:
         raise HTTPException(status_code=404, detail="Prospect not found")
 
-    if prospect["platform"] != "freelancer":
-        raise HTTPException(status_code=400, detail=f"Bid submission not supported for platform: {prospect['platform']}")
+    platform = prospect["platform"]
+    if platform not in SUPPORTED_BID_PLATFORMS:
+        raise HTTPException(status_code=400, detail=f"Bid submission not supported for platform: {platform}")
 
-    if not FREELANCER_TOKEN:
+    if platform == "freelancer" and not FREELANCER_TOKEN:
         raise HTTPException(status_code=503, detail="FREELANCER_TOKEN not configured")
+    if platform == "github_bounties" and not GITHUB_TOKEN:
+        raise HTTPException(status_code=503, detail="GITHUB_TOKEN not configured")
 
     project_id = prospect.get("platform_job_id")
     if not project_id:
@@ -1235,7 +1241,9 @@ async def submit_bid(prospect_id: str, bid: BidSubmission):
     bid_data = {
         "prospect_id": prospect_id,
         "project_id": project_id,
+        "platform": platform,
         "title": prospect["title"],
+        "url": prospect.get("url", ""),
         "amount": bid.amount,
         "period": bid.period,
         "milestone_percentage": bid.milestone_percentage,
@@ -1245,7 +1253,7 @@ async def submit_bid(prospect_id: str, bid: BidSubmission):
     if BID_REQUIRE_APPROVAL:
         bid_id = str(uuid.uuid4())
         _pending_bids[bid_id] = bid_data
-        logger.info("Bid %s pending approval: %s ($%.2f)", bid_id[:8], prospect["title"][:40], bid.amount)
+        logger.info("Bid %s pending approval: %s ($%.2f) [%s]", bid_id[:8], prospect["title"][:40], bid.amount, platform)
         return {
             "ok": 1,
             "status": "pending_approval",
@@ -1254,6 +1262,8 @@ async def submit_bid(prospect_id: str, bid: BidSubmission):
             **bid_data,
         }
 
+    if platform == "github_bounties":
+        return await _submit_github_comment(prospect_id, prospect, bid.description, bid.amount)
     return await _submit_freelancer_bid(prospect_id, project_id, bid, bid.description)
 
 
@@ -1270,6 +1280,15 @@ async def approve_bid(bid_id: str):
 
     prospect_id = bid_data["prospect_id"]
     project_id = bid_data["project_id"]
+    platform = bid_data.get("platform", "freelancer")
+
+    if platform == "github_bounties":
+        prospect = await _get_prospect(prospect_id)
+        if not prospect:
+            raise HTTPException(status_code=404, detail="Prospect not found")
+        return await _submit_github_comment(
+            prospect_id, prospect, bid_data["description"], bid_data["amount"]
+        )
 
     bid_req = BidSubmission(
         prospect_id=prospect_id,
@@ -1348,6 +1367,70 @@ async def _submit_freelancer_bid(prospect_id: str, project_id: str, bid: BidSubm
     except httpx.RequestError as e:
         logger.error("Freelancer API unreachable: %s", e)
         raise HTTPException(status_code=503, detail=f"Freelancer API unreachable: {e}")
+
+
+def _parse_github_issue_url(url: str) -> tuple[str, str, int] | None:
+    """Extract (owner, repo, issue_number) from a GitHub issue URL."""
+    match = re.match(r"https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)", url or "")
+    if match:
+        return match.group(1), match.group(2), int(match.group(3))
+    return None
+
+
+async def _submit_github_comment(prospect_id: str, prospect: dict, description: str, amount: float) -> dict:
+    if not GITHUB_TOKEN:
+        raise HTTPException(status_code=503, detail="GITHUB_TOKEN not configured")
+
+    parsed = _parse_github_issue_url(prospect.get("url", ""))
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Cannot parse GitHub issue URL from prospect")
+
+    owner, repo, issue_number = parsed
+
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{GITHUB_API}/repos/{owner}/{repo}/issues/{issue_number}/comments",
+                json={"body": description},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            await _update_status(prospect_id, "applied")
+
+            logger.info("GitHub comment posted for prospect %s: %s/%s#%d",
+                        prospect_id[:8], owner, repo, issue_number)
+
+            return {
+                "ok": 1,
+                "status": "submitted",
+                "platform": "github_bounties",
+                "prospect_id": prospect_id,
+                "issue": f"{owner}/{repo}#{issue_number}",
+                "comment_url": result.get("html_url", ""),
+                "amount": amount,
+            }
+
+    except httpx.HTTPStatusError as e:
+        error_body = {}
+        try:
+            error_body = e.response.json()
+        except Exception:
+            pass
+        logger.error("GitHub comment failed: %s %s", e.response.status_code, error_body)
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"GitHub API error: {error_body.get('message', str(e))}",
+        )
+    except httpx.RequestError as e:
+        logger.error("GitHub API unreachable: %s", e)
+        raise HTTPException(status_code=503, detail=f"GitHub API unreachable: {e}")
 
 
 async def _update_status(prospect_id: str, status: str):
@@ -1434,12 +1517,6 @@ async def _save_prospect(p: dict):
             (p["id"], p["platform"], p["platform_job_id"], p["title"], p["description"],
              p["budget_min"], p["budget_max"], p.get("skills", ""), p["status"], p.get("url", "")),
         )
-        await db.commit()
-
-
-async def _update_status(prospect_id: str, status: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE prospects SET status = ? WHERE id = ?", (status, prospect_id))
         await db.commit()
 
 
