@@ -36,6 +36,10 @@ services:
       - AUTONOMOUS_INTERVAL_SECONDS=${AUTONOMOUS_INTERVAL_SECONDS:-300}
       - AUTO_APPLY_ENABLED=${AUTO_APPLY_ENABLED:-true}
       - MAX_PARALLEL_TASKS=${MAX_PARALLEL_TASKS:-5}
+      - AGENT_CAPABILITIES=${AGENT_CAPABILITIES:-coding,writing,research,data_analysis,web_development,automation}
+      - MAX_DAILY_APPLICATIONS=${MAX_DAILY_APPLICATIONS:-50}
+      - REQUIRE_QUALITY_REVIEW=${REQUIRE_QUALITY_REVIEW:-true}
+      - MIN_QUALITY_SCORE=${MIN_QUALITY_SCORE:-0.6}
       - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000

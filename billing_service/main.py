@@ -63,7 +63,7 @@ class PaymentUpdate(BaseModel):
     status: str
 
 
-VALID_STATUSES = {"draft", "sent", "paid", "failed", "refunded", "cancelled"}
+VALID_STATUSES = {"draft", "sent", "paid", "failed", "refunded", "cancelled", "disputed"}
 
 
 async def _init_db():
@@ -258,6 +258,48 @@ async def update_invoice_status(invoice_id: str, update: PaymentUpdate):
         await db.commit()
 
     return {"ok": 1, "invoice_id": invoice_id, "status": update.status}
+
+
+class DisputeRequest(BaseModel):
+    reason: str
+    requested_refund_pct: float = Field(default=100.0, ge=0, le=100)
+
+
+@app.post("/invoices/{invoice_id}/dispute")
+async def dispute_invoice(invoice_id: str, dispute: DisputeRequest):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM invoices WHERE invoice_id = ?", (invoice_id,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+
+        invoice = dict(row)
+        if invoice["status"] == "refunded":
+            raise HTTPException(status_code=409, detail="Invoice already refunded")
+        if invoice["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Invoice already cancelled")
+
+        refund_amount = round(invoice["amount_usd"] * dispute.requested_refund_pct / 100, 2)
+        new_status = "refunded" if dispute.requested_refund_pct >= 100 else "disputed"
+
+        await db.execute(
+            "UPDATE invoices SET status = ? WHERE invoice_id = ?",
+            (new_status, invoice_id),
+        )
+        await _log_event(db, invoice_id, f"dispute_{new_status}", refund_amount)
+        await db.commit()
+
+    logger.info("Dispute on invoice %s: %s (refund $%.2f / %.0f%%)",
+                invoice_id, dispute.reason, refund_amount, dispute.requested_refund_pct)
+
+    return {
+        "ok": 1,
+        "invoice_id": invoice_id,
+        "status": new_status,
+        "refund_amount_usd": refund_amount,
+        "reason": dispute.reason,
+    }
 
 
 @app.post("/webhooks/stripe")

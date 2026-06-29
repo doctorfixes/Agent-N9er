@@ -50,7 +50,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 PROSPECT_STATUSES = [
     "discovered", "evaluating", "approved", "applied",
-    "hired", "executing", "delivered", "paid", "rated", "rejected",
+    "hired", "executing", "delivered", "paid", "rated", "rejected", "review_needed",
 ]
 
 

@@ -59,6 +59,16 @@ AUTONOMOUS_INTERVAL = int(os.getenv("AUTONOMOUS_INTERVAL_SECONDS", "300"))
 AUTO_APPLY_ENABLED = os.getenv("AUTO_APPLY_ENABLED", "true").lower() == "true"
 MAX_PARALLEL_TASKS = int(os.getenv("MAX_PARALLEL_TASKS", "5"))
 
+AGENT_CAPABILITIES = set(
+    c.strip() for c in os.getenv(
+        "AGENT_CAPABILITIES",
+        "coding,writing,research,data_analysis,web_development,automation",
+    ).split(",") if c.strip()
+)
+MAX_DAILY_APPLICATIONS = int(os.getenv("MAX_DAILY_APPLICATIONS", "50"))
+REQUIRE_QUALITY_REVIEW = os.getenv("REQUIRE_QUALITY_REVIEW", "true").lower() == "true"
+MIN_QUALITY_SCORE = float(os.getenv("MIN_QUALITY_SCORE", "0.6"))
+
 app = FastAPI(title="Agent N9er Orchestrator")
 
 app.add_middleware(RequestIDMiddleware)
@@ -161,6 +171,8 @@ _autonomous_state = {
     "prospects_applied": 0,
     "prospects_executed": 0,
     "total_revenue_generated": 0.0,
+    "daily_applications": 0,
+    "daily_applications_date": None,
 }
 
 
@@ -308,6 +320,25 @@ async def _evaluate_prospect(client: httpx.AsyncClient, prospect_id: str, svc: d
 
 async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict) -> dict:
     pid = prospect["id"]
+
+    # Daily application limit check
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _autonomous_state.get("daily_applications_date") != today:
+        _autonomous_state["daily_applications"] = 0
+        _autonomous_state["daily_applications_date"] = today
+    if _autonomous_state["daily_applications"] >= MAX_DAILY_APPLICATIONS:
+        logger.info("Skipped prospect %s: daily application limit reached (%d)", pid[:8], MAX_DAILY_APPLICATIONS)
+        return {"ok": 0, "prospect_id": pid, "reason": "daily_limit_reached"}
+
+    # Skill-matching gate
+    prospect_skills_raw = prospect.get("skills", "")
+    if prospect_skills_raw:
+        prospect_skills = set(s.strip().lower() for s in prospect_skills_raw.split(",") if s.strip())
+        agent_caps_lower = set(c.lower() for c in AGENT_CAPABILITIES)
+        if not prospect_skills & agent_caps_lower:
+            logger.info("Skipped prospect %s: no matching skills", pid[:8])
+            return {"ok": 0, "prospect_id": pid, "reason": "no_skill_match"}
+
     try:
         proposal_resp = await client.post(
             f"{EXECUTION_URL}/proposal",
@@ -330,6 +361,8 @@ async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: d
             json={"status": "applied"},
             headers=svc,
         )
+
+        _autonomous_state["daily_applications"] += 1
 
         logger.info("Auto-applied to prospect %s: %s [%s]",
                      pid[:8], prospect.get("title", "?")[:50], proposal_data.get("mode"))
@@ -366,6 +399,35 @@ async def _execute_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict
 
         invoiced = False
         if exec_data.get("success"):
+            # Quality verification gate
+            if REQUIRE_QUALITY_REVIEW:
+                try:
+                    quality_resp = await client.post(
+                        f"{EVALUATOR_URL}/evaluate-output",
+                        json={
+                            "task_id": pid,
+                            "title": prospect.get("title", ""),
+                            "description": prospect.get("description", ""),
+                            "output_preview": exec_data.get("output_preview", ""),
+                        },
+                        headers=svc,
+                        timeout=30.0,
+                    )
+                    quality_data = quality_resp.json()
+                    quality_score = quality_data.get("quality_score", 0)
+                except Exception:
+                    logger.warning("Quality check unreachable for %s, marking review_needed", pid[:8])
+                    quality_score = 0
+
+                if quality_score < MIN_QUALITY_SCORE:
+                    await client.patch(
+                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                        json={"status": "review_needed"},
+                        headers=svc,
+                    )
+                    return {"ok": 1, "prospect_id": pid, "invoiced": False,
+                            "quality_score": quality_score, "needs_review": True}
+
             await client.patch(
                 f"{PROSPECTOR_URL}/prospects/{pid}",
                 json={"status": "delivered"},
@@ -1040,6 +1102,107 @@ async def trigger_autonomous_cycle():
         return {"ok": 0, "detail": "Cycle already in progress"}
     stats = await _run_autonomous_cycle()
     return {"ok": 1, "cycle_stats": stats, "state": _autonomous_state}
+
+
+# ---------------------------------------------------------------------------
+# Review workflow endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/review/pending")
+async def pending_reviews():
+    """List prospects awaiting human review before delivery."""
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await client.get(
+                f"{PROSPECTOR_URL}/prospects",
+                params={"status": "review_needed", "limit": 50},
+                headers=_svc_headers(),
+            )
+            resp.raise_for_status()
+            prospects = resp.json()
+
+            # Enrich with execution output
+            enriched = []
+            for p in prospects:
+                entry = dict(p)
+                try:
+                    out_resp = await client.get(
+                        f"{EXECUTION_URL}/executions/{p['id']}/output",
+                        headers=_svc_headers(),
+                    )
+                    if out_resp.status_code == 200:
+                        entry["execution_output"] = out_resp.json().get("output", "")
+                except Exception:
+                    entry["execution_output"] = ""
+                enriched.append(entry)
+            return enriched
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Failed to fetch pending reviews: %s", e)
+        return []
+
+
+@app.post("/review/{prospect_id}")
+async def review_prospect(prospect_id: str, decision: dict):
+    """Approve or reject a prospect's completed work.
+    Body: {"action": "approve"} or {"action": "reject", "reason": "..."}
+    """
+    action = decision.get("action", "")
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=422, detail="action must be 'approve' or 'reject'")
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            svc = _svc_headers()
+            if action == "approve":
+                # Mark as delivered
+                await client.patch(
+                    f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+                    json={"status": "delivered"},
+                    headers=svc,
+                )
+
+                # Get prospect details for invoicing
+                p_resp = await client.get(
+                    f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+                    headers=svc,
+                )
+                prospect = p_resp.json() if p_resp.status_code == 200 else {}
+
+                # Auto-invoice
+                invoiced = False
+                quoted = prospect.get("quoted_price", 0) or prospect.get("budget_max", 0)
+                if quoted > 0:
+                    try:
+                        await client.post(
+                            f"{BILLING_URL}/invoices",
+                            json={
+                                "prospect_id": prospect_id,
+                                "client_email": prospect.get("client_email", ""),
+                                "description": prospect.get("title", ""),
+                                "amount_usd": quoted,
+                                "token_cost_usd": prospect.get("actual_cost", 0),
+                                "platform": prospect.get("platform", ""),
+                            },
+                            headers=svc,
+                        )
+                        invoiced = True
+                    except Exception:
+                        pass
+
+                return {"ok": 1, "prospect_id": prospect_id, "status": "delivered", "invoiced": invoiced}
+
+            else:  # reject
+                reason = decision.get("reason", "quality_insufficient")
+                await client.patch(
+                    f"{PROSPECTOR_URL}/prospects/{prospect_id}",
+                    json={"status": "approved"},
+                    headers=svc,
+                )
+                logger.info("Rejected delivery for %s: %s", prospect_id[:8], reason)
+                return {"ok": 1, "prospect_id": prospect_id, "status": "rejected_to_approved", "reason": reason}
+
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Service error: {e}")
 
 
 @app.get("/pipeline/momentum")
