@@ -47,6 +47,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 FREELANCER_API_BASE = "https://www.freelancer.com/api"
 FREELANCER_TOKEN = os.getenv("FREELANCER_TOKEN", "")
+FREELANCER_ID = os.getenv("FREELANCER_ID", "")
 BID_REQUIRE_APPROVAL = os.getenv("BID_REQUIRE_APPROVAL", "true").lower() == "true"
 
 PROSPECT_STATUSES = [
@@ -1296,8 +1297,12 @@ async def _submit_freelancer_bid(prospect_id: str, project_id: str, bid: BidSubm
         "Content-Type": "application/json",
     }
 
+    if not FREELANCER_ID:
+        raise HTTPException(status_code=503, detail="FREELANCER_ID not configured")
+
     payload = {
         "project_id": int(project_id),
+        "bidder_id": int(FREELANCER_ID),
         "amount": bid.amount,
         "period": bid.period,
         "milestone_percentage": bid.milestone_percentage,

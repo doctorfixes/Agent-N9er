@@ -344,6 +344,7 @@ services:
       - NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
       - NOTIFY_MIN_BUDGET=${NOTIFY_MIN_BUDGET:-100}
       - FREELANCER_TOKEN=${FREELANCER_TOKEN:-}
+      - FREELANCER_ID=${FREELANCER_ID:-}
       - BID_REQUIRE_APPROVAL=${BID_REQUIRE_APPROVAL:-true}
     volumes:
       - prospector-data:/data
