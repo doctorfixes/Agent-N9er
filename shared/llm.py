@@ -27,7 +27,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 8192,
         "label": "Quick tasks, classification, simple Q&A",
         "models": {
-            "openrouter": "anthropic/claude-3.5-haiku",
+            "openrouter": "anthropic/claude-3-haiku",
             "anthropic": "claude-3-5-haiku-latest",
             "openai": "gpt-4o-mini",
             "azure": os.getenv("AZURE_OPENAI_BUDGET_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")),
@@ -40,7 +40,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 16384,
         "label": "Code generation, analysis, writing",
         "models": {
-            "openrouter": "anthropic/claude-3.5-sonnet",
+            "openrouter": "anthropic/claude-3.5-sonnet:beta",
             "anthropic": "claude-3-5-sonnet-latest",
             "openai": "gpt-4o",
             "azure": os.getenv("AZURE_OPENAI_STANDARD_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")),
@@ -53,7 +53,7 @@ BASE_MODEL_TIERS = {
         "max_tokens": 32768,
         "label": "Complex reasoning, architecture, research",
         "models": {
-            "openrouter": "anthropic/claude-3-opus",
+            "openrouter": "anthropic/claude-3-opus:beta",
             "anthropic": "claude-3-opus-latest",
             "openai": "gpt-4o",
             "azure": os.getenv("AZURE_OPENAI_PREMIUM_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")),
@@ -242,6 +242,8 @@ async def _openrouter_complete(
             "temperature": temperature,
         },
     )
+    if resp.status_code >= 400:
+        logger.error("OpenRouter error %d for model %s: %s", resp.status_code, model, resp.text[:500])
     resp.raise_for_status()
     data = resp.json()
     usage = data.get("usage", {})
