@@ -1,11 +1,13 @@
 import os
 import sys
 import asyncio
+import json as _json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import aiosqlite
@@ -67,6 +69,14 @@ _scan_state = {
     "last_results": {},
 }
 
+_service_health = {}
+_HEALTH_ENDPOINTS = {
+    "prospector": PROSPECTOR_URL,
+    "execution": EXECUTION_URL,
+    "reputation": REPUTATION_URL,
+}
+HEALTH_CHECK_TIMEOUT = httpx.Timeout(5.0)
+
 
 class AgentRegisterRequest(BaseModel):
     agent_id: str
@@ -96,7 +106,90 @@ async def _init_db():
                 confidence REAL DEFAULT 0.5
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reasoning TEXT NOT NULL,
+                context TEXT DEFAULT '{}',
+                outcome TEXT DEFAULT 'pending',
+                severity TEXT DEFAULT 'info'
+            )
+        """)
         await db.commit()
+
+
+async def _journal(event: str, decision: str, reasoning: str,
+                   context: dict | None = None, outcome: str = "pending",
+                   severity: str = "info"):
+    ts = datetime.now(timezone.utc).isoformat()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO journal (timestamp, event, decision, reasoning, context, outcome, severity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts, event, decision, reasoning, _json.dumps(context or {}), outcome, severity),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning("Journal write failed: %s", e)
+    logger.info("JOURNAL [%s] %s — %s (%s)", severity, event, decision, reasoning)
+
+
+async def _check_service_health():
+    results = {}
+    async with httpx.AsyncClient(timeout=HEALTH_CHECK_TIMEOUT) as client:
+        for name, url in _HEALTH_ENDPOINTS.items():
+            try:
+                resp = await client.get(f"{url}/health")
+                up = resp.status_code == 200 and resp.json().get("ok") == 1
+                results[name] = {"up": up, "checked_at": datetime.now(timezone.utc).isoformat()}
+            except (httpx.RequestError, Exception):
+                results[name] = {"up": False, "checked_at": datetime.now(timezone.utc).isoformat()}
+    _service_health.update(results)
+    return results
+
+
+def _is_service_up(name: str) -> bool:
+    entry = _service_health.get(name)
+    return entry is not None and entry.get("up", False)
+
+
+async def _auto_unstick(client: httpx.AsyncClient, svc: dict) -> int:
+    try:
+        resp = await client.get(
+            f"{PROSPECTOR_URL}/prospects",
+            params={"status": "executing", "limit": 100},
+            headers=svc,
+        )
+        resp.raise_for_status()
+        stuck = resp.json()
+        if not stuck:
+            return 0
+
+        reset = 0
+        for prospect in stuck:
+            try:
+                await client.patch(
+                    f"{PROSPECTOR_URL}/prospects/{prospect['id']}",
+                    json={"status": "approved"},
+                    headers=svc,
+                )
+                reset += 1
+            except (httpx.RequestError, httpx.HTTPStatusError):
+                pass
+
+        if reset > 0:
+            await _journal(
+                "auto_unstick", f"Reset {reset} stuck prospects",
+                f"Found {len(stuck)} prospects stuck in 'executing' — execution service was likely down",
+                {"prospect_ids": [p["id"] for p in stuck[:10]], "total": len(stuck)},
+                outcome="resolved", severity="warn",
+            )
+        return reset
+    except (httpx.RequestError, httpx.HTTPStatusError):
+        return 0
 
 
 async def _load_agents():
@@ -139,13 +232,48 @@ async def _scan_loop():
                 await asyncio.sleep(5)
             else:
                 await asyncio.sleep(SCAN_INTERVAL)
+
+            health = await _check_service_health()
+            up_count = sum(1 for v in health.values() if v.get("up"))
+            total = len(health)
+            await _journal(
+                "health_check", f"{up_count}/{total} services online",
+                "; ".join(f"{k}={'UP' if v.get('up') else 'DOWN'}" for k, v in health.items()),
+                health, outcome="ok" if up_count == total else "degraded",
+                severity="info" if up_count == total else "warn",
+            )
+
+            if _is_service_up("prospector"):
+                svc = _svc_headers()
+                async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                    unstuck = await _auto_unstick(client, svc)
+                    if unstuck:
+                        logger.info("Auto-unstick: reset %d prospects", unstuck)
+            else:
+                await _journal(
+                    "scan_skipped", "Skipped scan — prospector is down",
+                    "Health check shows prospector service unreachable",
+                    severity="warn", outcome="skipped",
+                )
+                continue
+
             results = await _run_scan_cycle()
+
             if AUTO_DISPATCH_ENABLED:
-                await _dispatch_cycle()
+                if _is_service_up("prospector"):
+                    await _dispatch_cycle()
+                else:
+                    await _journal(
+                        "dispatch_skipped", "Skipped dispatch — prospector is down",
+                        "Post-scan dispatch deferred until services recover",
+                        severity="warn", outcome="skipped",
+                    )
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error("Scan loop error: %s", e)
+            await _journal("scan_loop_error", "Scan loop crashed",
+                           str(e), severity="error", outcome="error")
             await asyncio.sleep(60)
 
 
@@ -178,6 +306,14 @@ async def _run_scan_cycle():
     _scan_state["total_discovered"] += total_new
     _scan_state["last_results"] = results
 
+    failed_platforms = [p for p, r in results.items() if "error" in r]
+    await _journal(
+        "scan_complete", f"Scanned {len(SCAN_PLATFORMS)} platforms, {total_new} new prospects",
+        f"Successful: {len(SCAN_PLATFORMS) - len(failed_platforms)}, "
+        f"Failed: {failed_platforms if failed_platforms else 'none'}",
+        {"results": results, "total_new": total_new},
+        outcome="ok" if not failed_platforms else "partial",
+    )
     logger.info("Scan cycle complete: %d platforms, %d new prospects", len(SCAN_PLATFORMS), total_new)
     return results
 
@@ -200,6 +336,8 @@ async def _dispatch_cycle():
 
             if not discovered:
                 logger.info("Dispatch: no discovered prospects to process")
+                await _journal("dispatch_idle", "No prospects to process",
+                               "Zero discovered prospects in queue", outcome="ok")
                 return stats
 
             logger.info("Dispatch: processing %d discovered prospects", len(discovered))
@@ -217,8 +355,14 @@ async def _dispatch_cycle():
                     stats["evaluated"] += 1
 
                     if eval_data.get("status") != "approved":
-                        logger.info("Dispatch: %s rejected (%s)", prospect["title"][:40],
-                                    eval_data.get("evaluation", {}).get("rejection_reason", "not viable"))
+                        reason = eval_data.get("evaluation", {}).get("rejection_reason", "not viable")
+                        logger.info("Dispatch: %s rejected (%s)", prospect["title"][:40], reason)
+                        await _journal(
+                            "prospect_rejected", f"Rejected: {prospect['title'][:60]}",
+                            reason,
+                            {"prospect_id": pid, "platform": prospect.get("platform", "")},
+                            outcome="rejected",
+                        )
                         continue
 
                     stats["approved"] += 1
@@ -267,6 +411,12 @@ async def _dispatch_cycle():
                             bid_resp.raise_for_status()
                             bid_data = bid_resp.json()
                             stats["bids_queued"] += 1
+                            await _journal(
+                                "bid_queued", f"Bid queued: {prospect['title'][:60]}",
+                                f"${quoted_price:.2f} on {platform} — {bid_data.get('status', 'unknown')}",
+                                {"prospect_id": pid, "platform": platform, "amount": quoted_price},
+                                outcome="queued",
+                            )
                             logger.info("Dispatch: bid queued for %s ($%.2f) [%s] — %s",
                                         prospect["title"][:40], quoted_price, platform,
                                         bid_data.get("status", "unknown"))
@@ -286,7 +436,15 @@ async def _dispatch_cycle():
     except Exception as e:
         logger.error("Dispatch cycle error: %s", e)
         stats["errors"] += 1
+        await _journal("dispatch_error", "Dispatch cycle failed",
+                       str(e), stats, outcome="error", severity="error")
 
+    await _journal(
+        "dispatch_complete",
+        f"Dispatch: {stats['evaluated']} evaluated, {stats['approved']} approved, {stats['bids_queued']} bids",
+        f"Proposals: {stats['proposals']}, Errors: {stats['errors']}",
+        stats, outcome="ok" if stats["errors"] == 0 else "partial",
+    )
     logger.info("Dispatch complete: %s", stats)
     _scan_state["last_dispatch"] = stats
     return stats
@@ -297,6 +455,13 @@ async def lifespan(app):
     global _scan_task
     await _init_db()
     await _load_agents()
+    await _journal(
+        "system_boot", "Agent N9er starting up",
+        f"Auto-scan={'ON' if AUTO_SCAN_ENABLED else 'OFF'}, "
+        f"Auto-dispatch={'ON' if AUTO_DISPATCH_ENABLED else 'OFF'}, "
+        f"Scan interval={SCAN_INTERVAL}s, Platforms={SCAN_PLATFORMS}",
+        outcome="ok",
+    )
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
         logger.info("Auto-scan enabled: interval=%ds, platforms=%s, auto_dispatch=%s",
@@ -777,6 +942,15 @@ class ExecuteWorkRequest(BaseModel):
 @app.post("/prospects/execute-work")
 async def execute_prospect_work(req: ExecuteWorkRequest):
     """Generate deliverables for prospects in 'executing' (or other) status."""
+    await _check_service_health()
+    if not _is_service_up("execution"):
+        await _journal(
+            "execute_blocked", "Execution blocked — service is down",
+            "Refusing to attempt execution while execution service is unreachable",
+            severity="warn", outcome="blocked",
+        )
+        raise HTTPException(status_code=503, detail="Execution service is down — refusing to create stuck prospects")
+
     svc = _svc_headers()
     results = {
         "total": 0,
@@ -947,3 +1121,136 @@ async def unstick_prospects(req: UnstickRequest):
             }
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Service unreachable: {e}")
+
+
+@app.get("/journal")
+async def get_journal(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    severity: Optional[str] = None,
+    event: Optional[str] = None,
+):
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            where_parts = []
+            params = []
+            if severity:
+                where_parts.append("severity = ?")
+                params.append(severity)
+            if event:
+                where_parts.append("event LIKE ?")
+                params.append(f"%{event}%")
+            where = "WHERE " + " AND ".join(where_parts) if where_parts else ""
+            cursor = await db.execute(
+                f"SELECT * FROM journal {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            )
+            rows = await cursor.fetchall()
+            count_cursor = await db.execute(f"SELECT COUNT(*) FROM journal {where}", params)
+            total = (await count_cursor.fetchone())[0]
+            entries = []
+            for row in rows:
+                entry = dict(row)
+                try:
+                    entry["context"] = _json.loads(entry.get("context", "{}"))
+                except (ValueError, TypeError):
+                    pass
+                entries.append(entry)
+            return {"entries": entries, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Journal read error: {e}")
+
+
+@app.get("/services/health")
+async def services_health(refresh: bool = False):
+    if refresh or not _service_health:
+        await _check_service_health()
+    up_count = sum(1 for v in _service_health.values() if v.get("up"))
+    return {
+        "services": _service_health,
+        "total": len(_service_health),
+        "online": up_count,
+        "status": "healthy" if up_count == len(_service_health) else (
+            "degraded" if up_count > 0 else "down"
+        ),
+    }
+
+
+@app.get("/self-awareness")
+async def self_awareness():
+    """Agent N9er's self-assessment: what it knows about its own state."""
+    await _check_service_health()
+    up_count = sum(1 for v in _service_health.values() if v.get("up"))
+    total_svc = len(_service_health)
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM journal WHERE severity = 'error' AND timestamp > datetime('now', '-24 hours')"
+            )
+            errors_24h = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM journal WHERE severity = 'warn' AND timestamp > datetime('now', '-24 hours')"
+            )
+            warnings_24h = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT event, COUNT(*) as cnt FROM journal WHERE timestamp > datetime('now', '-24 hours') GROUP BY event ORDER BY cnt DESC LIMIT 10"
+            )
+            event_freq = [{"event": r[0], "count": r[1]} for r in await cursor.fetchall()]
+
+            cursor = await db.execute(
+                "SELECT * FROM journal WHERE severity IN ('error', 'warn') ORDER BY id DESC LIMIT 5"
+            )
+            recent_issues = []
+            for row in await cursor.fetchall():
+                recent_issues.append({"timestamp": row[1], "event": row[2], "decision": row[3], "reasoning": row[4], "severity": row[7]})
+    except Exception:
+        errors_24h = warnings_24h = 0
+        event_freq = []
+        recent_issues = []
+
+    issues = []
+    recommendations = []
+
+    if up_count < total_svc:
+        down = [k for k, v in _service_health.items() if not v.get("up")]
+        issues.append(f"Services down: {', '.join(down)}")
+        recommendations.append(f"Restart {', '.join(down)} — execution and dispatch are blocked")
+
+    if errors_24h > 5:
+        issues.append(f"{errors_24h} errors in the last 24h — system is unstable")
+        recommendations.append("Review journal errors before continuing autonomous operations")
+
+    if _scan_state["total_scans"] > 0 and _scan_state["total_discovered"] == 0:
+        issues.append("Scans running but zero prospects discovered — check platform credentials")
+        recommendations.append("Verify API keys and platform configuration")
+
+    if not issues:
+        recommendations.append("All systems nominal — autonomous operations safe to continue")
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "health": {
+            "services_online": f"{up_count}/{total_svc}",
+            "status": "healthy" if up_count == total_svc else "degraded",
+            "services": _service_health,
+        },
+        "activity": {
+            "total_scans": _scan_state["total_scans"],
+            "total_discovered": _scan_state["total_discovered"],
+            "last_scan": _scan_state.get("last_scan_at"),
+            "auto_scan": AUTO_SCAN_ENABLED,
+            "auto_dispatch": AUTO_DISPATCH_ENABLED,
+        },
+        "stability": {
+            "errors_24h": errors_24h,
+            "warnings_24h": warnings_24h,
+            "event_frequency": event_freq,
+        },
+        "recent_issues": recent_issues,
+        "issues": issues,
+        "recommendations": recommendations,
+    }

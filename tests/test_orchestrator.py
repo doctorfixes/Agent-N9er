@@ -908,6 +908,12 @@ async def test_unstick_no_stuck_prospects(client):
     assert data["reset"] == 0
 
 
+def _mock_service_up():
+    """Mock _check_service_health so execute-work doesn't hit real services."""
+    health = {"execution": {"up": True}, "prospector": {"up": True}, "reputation": {"up": True}}
+    return patch.object(orch, "_service_health", health)
+
+
 async def test_execute_work_rolls_back_on_failure(client):
     """Execute-work resets prospect to 'approved' when execution fails."""
     prospects = [{"id": "rb1", "title": "Rollback test", "status": "executing"}]
@@ -931,7 +937,9 @@ async def test_execute_work_rolls_back_on_failure(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+    with _mock_service_up(), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value={})), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
         resp = await client.post("/prospects/execute-work", json={"status_filter": "executing"})
 
     data = resp.json()
@@ -963,9 +971,77 @@ async def test_execute_work_rolls_back_on_service_error(client):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+    with _mock_service_up(), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value={})), \
+            patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
         resp = await client.post("/prospects/execute-work", json={"status_filter": "executing"})
 
     data = resp.json()
     assert data["failed"] == 1
     assert any(p.get("status") == "approved" for p in patch_calls)
+
+
+async def test_execute_work_blocked_when_service_down(client):
+    """Execute-work returns 503 when execution service is down."""
+    health = {"execution": {"up": False}, "prospector": {"up": True}, "reputation": {"up": True}}
+    with patch.object(orch, "_service_health", health), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value=health)):
+        resp = await client.post("/prospects/execute-work", json={"status_filter": "executing"})
+    assert resp.status_code == 503
+
+
+async def test_journal_endpoint(client):
+    """Journal API returns entries."""
+    await orch._journal("test_event", "test decision", "test reasoning", outcome="ok")
+    resp = await client.get("/journal")
+    data = resp.json()
+    assert "entries" in data
+    assert "total" in data
+    assert data["total"] >= 1
+    assert any(e["event"] == "test_event" for e in data["entries"])
+
+
+async def test_journal_severity_filter(client):
+    """Journal API filters by severity."""
+    await orch._journal("warn_event", "warning decision", "test", severity="warn")
+    resp = await client.get("/journal", params={"severity": "warn"})
+    data = resp.json()
+    assert all(e["severity"] == "warn" for e in data["entries"])
+
+
+async def test_services_health_endpoint(client):
+    """Services health endpoint returns status."""
+    health = {"execution": {"up": True}, "prospector": {"up": False}, "reputation": {"up": True}}
+    with patch.object(orch, "_service_health", health), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value=health)):
+        resp = await client.get("/services/health")
+    data = resp.json()
+    assert data["online"] == 2
+    assert data["total"] == 3
+    assert data["status"] == "degraded"
+
+
+async def test_self_awareness_endpoint(client):
+    """Self-awareness endpoint returns full assessment."""
+    health = {"execution": {"up": True}, "prospector": {"up": True}, "reputation": {"up": True}}
+    with patch.object(orch, "_service_health", health), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value=health)):
+        resp = await client.get("/self-awareness")
+    data = resp.json()
+    assert "health" in data
+    assert "activity" in data
+    assert "stability" in data
+    assert "recommendations" in data
+    assert data["health"]["status"] == "healthy"
+
+
+async def test_self_awareness_degraded(client):
+    """Self-awareness flags issues when services are down."""
+    health = {"execution": {"up": False}, "prospector": {"up": True}, "reputation": {"up": True}}
+    with patch.object(orch, "_service_health", health), \
+            patch.object(orch, "_check_service_health", AsyncMock(return_value=health)):
+        resp = await client.get("/self-awareness")
+    data = resp.json()
+    assert data["health"]["status"] == "degraded"
+    assert len(data["issues"]) > 0
+    assert any("execution" in r.lower() for r in data["recommendations"])

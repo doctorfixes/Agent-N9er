@@ -30,6 +30,7 @@ export default function RootLayout({ children }) {
             <a href="/revenue">Revenue</a>
             <a href="/tasks">Tasks</a>
             <a href="/analytics">Analytics</a>
+            <a href="/journal">Journal</a>
             <a href="/leaderboard">Agents</a>
             <a href="/admin" className="nav-admin">Admin</a>
           </div>
