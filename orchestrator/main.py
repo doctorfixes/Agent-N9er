@@ -245,7 +245,9 @@ async def _dispatch_cycle():
                         proposal_text = f"Interested in \"{prospect['title']}\". Ready to deliver quality work within the specified timeline."
 
                     # 4. Submit bid (goes through approval gate)
-                    if prospect.get("platform") == "freelancer" and prospect.get("platform_job_id"):
+                    bid_platforms = {"freelancer", "github_bounties"}
+                    platform = prospect.get("platform", "")
+                    if platform in bid_platforms and prospect.get("platform_job_id"):
                         try:
                             bid_resp = await client.post(
                                 f"{PROSPECTOR_URL}/prospects/{pid}/bid",
@@ -260,16 +262,15 @@ async def _dispatch_cycle():
                             bid_resp.raise_for_status()
                             bid_data = bid_resp.json()
                             stats["bids_queued"] += 1
-                            logger.info("Dispatch: bid queued for %s ($%.2f) — %s",
-                                        prospect["title"][:40], quoted_price,
+                            logger.info("Dispatch: bid queued for %s ($%.2f) [%s] — %s",
+                                        prospect["title"][:40], quoted_price, platform,
                                         bid_data.get("status", "unknown"))
                         except (httpx.RequestError, httpx.HTTPStatusError) as e:
                             logger.warning("Dispatch: bid submission failed for %s: %s", pid[:8], e)
                             stats["errors"] += 1
                     else:
-                        # Non-freelancer: just mark as approved, proposal ready
-                        logger.info("Dispatch: %s approved with proposal (non-freelancer, no auto-bid)",
-                                    prospect["title"][:40])
+                        logger.info("Dispatch: %s approved with proposal (%s, no auto-bid)",
+                                    prospect["title"][:40], platform)
 
                 except (httpx.RequestError, httpx.HTTPStatusError) as e:
                     logger.warning("Dispatch: evaluation failed for %s: %s", pid[:8], e)
