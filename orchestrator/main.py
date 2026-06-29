@@ -131,9 +131,14 @@ DISPATCH_RATE_DELAY = int(os.getenv("DISPATCH_RATE_DELAY_SECONDS", "3"))
 
 
 async def _scan_loop():
+    first_run = True
     while True:
         try:
-            await asyncio.sleep(SCAN_INTERVAL)
+            if first_run:
+                first_run = False
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(SCAN_INTERVAL)
             results = await _run_scan_cycle()
             if AUTO_DISPATCH_ENABLED:
                 await _dispatch_cycle()
