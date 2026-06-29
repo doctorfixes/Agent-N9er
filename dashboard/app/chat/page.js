@@ -14,10 +14,16 @@ export default function ChatPage() {
   const [statusFilter, setStatusFilter] = useState("applied");
   const chatEndRef = useRef(null);
 
-  const { data: prospects } = useSWR(
+  const { data: prospects, mutate: mutateProspects } = useSWR(
     `/api/prospects?status=${statusFilter}`,
     fetcher,
-    { refreshInterval: 15000 }
+    { refreshInterval: 10000 }
+  );
+
+  const { data: pendingBids, mutate: mutateBids } = useSWR(
+    "/api/prospects/bid",
+    fetcher,
+    { refreshInterval: 10000 }
   );
 
   useEffect(() => {
@@ -137,18 +143,61 @@ export default function ChatPage() {
         }]);
       } else {
         const statusLabel = data.status === "pending_approval"
-          ? `Bid pending approval (ID: ${data.bid_id?.substring(0, 8)}). Approve via Prospects page.`
+          ? `Bid pending approval (ID: ${data.bid_id?.substring(0, 8)}). Amount: $${data.amount}. Approve below or via Prospects page.`
           : `Bid submitted: $${data.amount} on project ${data.project_id}`;
         setMessages((prev) => [...prev, {
           role: "system",
           content: statusLabel,
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          bidId: data.bid_id,
+          bidStatus: data.status,
         }]);
+        setSelectedProspect((prev) => prev ? { ...prev, bid_status: data.status, bid_id: data.bid_id } : prev);
+        mutateProspects();
+        mutateBids();
       }
     } catch (e) {
       setMessages((prev) => [...prev, {
         role: "error",
         content: `Bid submission failed: ${e.message}`,
+        time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+      }]);
+    }
+    setGenerating(false);
+  };
+
+  const approveBid = async (bidId) => {
+    setGenerating(true);
+    try {
+      const resp = await fetch(`/api/prospects/bid/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bid_id: bidId }),
+      });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || `Service returned ${resp.status}` }; }
+
+      if (data.error || data.detail) {
+        setMessages((prev) => [...prev, {
+          role: "error",
+          content: data.error || data.detail,
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+        }]);
+      } else {
+        setMessages((prev) => [...prev, {
+          role: "system",
+          content: `Bid approved and submitted to Freelancer: $${data.amount} on project ${data.project_id}`,
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+        }]);
+        setSelectedProspect((prev) => prev ? { ...prev, status: "applied", bid_status: "submitted" } : prev);
+        mutateProspects();
+        mutateBids();
+      }
+    } catch (e) {
+      setMessages((prev) => [...prev, {
+        role: "error",
+        content: `Approval failed: ${e.message}`,
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
       }]);
     }
@@ -185,8 +234,15 @@ export default function ChatPage() {
     <div style={{ display: "flex", gap: 16, height: "calc(100vh - 120px)" }}>
       <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column" }}>
         <div style={{ marginBottom: 8 }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "var(--accent-cyan)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
-            Prospect Chat
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: "var(--accent-cyan)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              Prospect Chat
+            </div>
+            {Array.isArray(pendingBids) && pendingBids.length > 0 && (
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent-yellow)", background: "rgba(234,179,8,0.1)", padding: "2px 8px", borderRadius: 3 }}>
+                {pendingBids.length} pending
+              </span>
+            )}
           </div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
             {["applied", "executing", "hired", "discovered", "approved"].map((s) => (
@@ -282,6 +338,19 @@ export default function ChatPage() {
                           : "var(--text-secondary)",
                     }}>
                       {msg.content}
+                      {msg.bidId && msg.bidStatus === "pending_approval" && (
+                        <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
+                          <button className="cmd-btn sm success" onClick={() => approveBid(msg.bidId)} disabled={generating}>
+                            Approve & Submit
+                          </button>
+                          <button className="cmd-btn sm" onClick={() => {
+                            setMessages((prev) => prev.map((m) => m.bidId === msg.bidId ? { ...m, bidStatus: "rejected", content: m.content + "\n— Bid rejected." } : m));
+                            mutateBids();
+                          }} style={{ color: "var(--accent-red)" }}>
+                            Reject
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div style={{ fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginTop: 3, textAlign: msg.role === "user" ? "right" : "left" }}>
                       {msg.time} {msg.role === "assistant" && msg.meta && `// ${msg.meta}`}
