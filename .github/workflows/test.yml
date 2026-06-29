@@ -20,6 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install -e .
           pip install pytest pytest-asyncio httpx fastapi aiosqlite asyncpg pydantic uvicorn stripe
 
       - name: Run tests
