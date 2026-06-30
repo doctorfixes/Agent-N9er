@@ -69,6 +69,62 @@ MAX_DAILY_APPLICATIONS = int(os.getenv("MAX_DAILY_APPLICATIONS", "50"))
 REQUIRE_QUALITY_REVIEW = os.getenv("REQUIRE_QUALITY_REVIEW", "true").lower() == "true"
 MIN_QUALITY_SCORE = float(os.getenv("MIN_QUALITY_SCORE", "0.6"))
 
+FREELANCER_OAUTH_TOKEN = os.getenv("FREELANCER_OAUTH_TOKEN", "")
+FREELANCER_USER_ID = os.getenv("FREELANCER_USER_ID", "")
+FREELANCER_API_BASE = os.getenv("FREELANCER_API_BASE", "https://www.freelancer.com/api")
+FREELANCER_LIVE = bool(FREELANCER_OAUTH_TOKEN and FREELANCER_USER_ID)
+
+
+async def _freelancer_place_bid(client: httpx.AsyncClient, prospect: dict, proposal_text: str, amount: float) -> dict:
+    """Place a real bid on Freelancer.com. Returns {ok, bid_id} or {ok: 0, error}."""
+    if not FREELANCER_LIVE:
+        return {"ok": 0, "error": "freelancer_not_configured"}
+    try:
+        resp = await client.post(
+            f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+            headers={"freelancer-oauth-v1": FREELANCER_OAUTH_TOKEN},
+            json={
+                "project_id": int(prospect["job_id"]) if str(prospect.get("job_id", "")).isdigit() else prospect.get("job_id"),
+                "bidder_id": int(FREELANCER_USER_ID),
+                "amount": amount or 1,
+                "period": 7,
+                "milestone_percentage": 100,
+                "description": proposal_text[:2000],
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        bid_id = (data.get("result") or {}).get("id")
+        return {"ok": 1, "bid_id": bid_id}
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer bid placement failed for %s: %s", prospect.get("id", "?")[:8], e)
+        return {"ok": 0, "error": str(e)}
+
+
+async def _freelancer_deliver(client: httpx.AsyncClient, prospect: dict, output_preview: str) -> dict:
+    """Post the completed work to the Freelancer project thread. Returns {ok, ...}."""
+    if not FREELANCER_LIVE:
+        return {"ok": 0, "error": "freelancer_not_configured"}
+    try:
+        project_id = prospect.get("job_id")
+        resp = await client.post(
+            f"{FREELANCER_API_BASE}/projects/0.1/threads/",
+            headers={"freelancer-oauth-v1": FREELANCER_OAUTH_TOKEN},
+            json={
+                "context_type": "project",
+                "context_id": int(project_id) if str(project_id).isdigit() else project_id,
+                "members": [int(FREELANCER_USER_ID)],
+                "message": f"Work completed. Summary:\n\n{output_preview[:4000]}",
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return {"ok": 1}
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer delivery post failed for %s: %s", prospect.get("id", "?")[:8], e)
+        return {"ok": 0, "error": str(e)}
+
 app = FastAPI(title="Agent N9er Orchestrator")
 
 app.add_middleware(RequestIDMiddleware)
@@ -330,14 +386,17 @@ async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: d
         logger.info("Skipped prospect %s: daily application limit reached (%d)", pid[:8], MAX_DAILY_APPLICATIONS)
         return {"ok": 0, "prospect_id": pid, "reason": "daily_limit_reached"}
 
-    # Skill-matching gate
+    # Skill-matching gate: fail-closed. Require an explicit overlap between the
+    # prospect's listed skills and our declared capabilities, and also reject
+    # when skills are unknown/blank rather than letting unmatched work through.
     prospect_skills_raw = prospect.get("skills", "")
-    if prospect_skills_raw:
-        prospect_skills = set(s.strip().lower() for s in prospect_skills_raw.split(",") if s.strip())
-        agent_caps_lower = set(c.lower() for c in AGENT_CAPABILITIES)
-        if not prospect_skills & agent_caps_lower:
-            logger.info("Skipped prospect %s: no matching skills", pid[:8])
-            return {"ok": 0, "prospect_id": pid, "reason": "no_skill_match"}
+    prospect_skills = set(s.strip().lower() for s in prospect_skills_raw.split(",") if s.strip())
+    agent_caps_lower = set(c.lower() for c in AGENT_CAPABILITIES)
+    title_desc = f"{prospect.get('title', '')} {prospect.get('description', '')}".lower()
+    keyword_match = any(cap in title_desc for cap in agent_caps_lower)
+    if not (prospect_skills & agent_caps_lower) and not keyword_match:
+        logger.info("Skipped prospect %s: no matching skills", pid[:8])
+        return {"ok": 0, "prospect_id": pid, "reason": "no_skill_match"}
 
     try:
         proposal_resp = await client.post(
@@ -356,6 +415,17 @@ async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: d
         proposal_resp.raise_for_status()
         proposal_data = proposal_resp.json()
 
+        bid_result = {"ok": 0, "error": "not_freelancer"}
+        if prospect.get("platform") == "freelancer" and FREELANCER_LIVE:
+            bid_result = await _freelancer_place_bid(
+                client, prospect,
+                proposal_data.get("proposal_text", proposal_data.get("text", "")),
+                prospect.get("budget_max", 0) or prospect.get("quoted_price", 0),
+            )
+            if not bid_result.get("ok"):
+                logger.warning("Live bid failed for %s, not marking applied: %s", pid[:8], bid_result.get("error"))
+                return {"ok": 0, "prospect_id": pid, "reason": "live_bid_failed", "error": bid_result.get("error")}
+
         await client.patch(
             f"{PROSPECTOR_URL}/prospects/{pid}",
             json={"status": "applied"},
@@ -364,9 +434,10 @@ async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: d
 
         _autonomous_state["daily_applications"] += 1
 
-        logger.info("Auto-applied to prospect %s: %s [%s]",
-                     pid[:8], prospect.get("title", "?")[:50], proposal_data.get("mode"))
-        return {"ok": 1, "prospect_id": pid, "proposal_mode": proposal_data.get("mode")}
+        logger.info("Auto-applied to prospect %s: %s [%s] live_bid=%s",
+                     pid[:8], prospect.get("title", "?")[:50], proposal_data.get("mode"), bid_result.get("ok"))
+        return {"ok": 1, "prospect_id": pid, "proposal_mode": proposal_data.get("mode"),
+                "live_bid_id": bid_result.get("bid_id")}
 
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logger.warning("Auto-apply failed for %s: %s", pid[:8], e)
@@ -427,6 +498,18 @@ async def _execute_prospect(client: httpx.AsyncClient, prospect: dict, svc: dict
                     )
                     return {"ok": 1, "prospect_id": pid, "invoiced": False,
                             "quality_score": quality_score, "needs_review": True}
+
+            if prospect.get("platform") == "freelancer" and FREELANCER_LIVE:
+                delivery_result = await _freelancer_deliver(client, prospect, exec_data.get("output_preview", ""))
+                if not delivery_result.get("ok"):
+                    await client.patch(
+                        f"{PROSPECTOR_URL}/prospects/{pid}",
+                        json={"status": "review_needed"},
+                        headers=svc,
+                    )
+                    return {"ok": 1, "prospect_id": pid, "invoiced": False,
+                            "needs_review": True, "reason": "live_delivery_failed",
+                            "error": delivery_result.get("error")}
 
             await client.patch(
                 f"{PROSPECTOR_URL}/prospects/{pid}",
