@@ -363,7 +363,7 @@ async def _scan_upwork(query: str, category: str, max_results: int) -> list[dict
                     url=item.get("link", ""),
                     skills=item.get("skills", ""),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Upwork RSS fetch failed: %s", e)
 
     return prospects
@@ -405,7 +405,7 @@ async def _scan_github(query: str, category: str, max_results: int) -> list[dict
                     url=issue.get("html_url", ""),
                     skills=",".join(l["name"] for l in issue.get("labels", [])),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("GitHub search failed: %s", e)
 
     return prospects
@@ -440,7 +440,7 @@ async def _scan_superteam(query: str, category: str, max_results: int) -> list[d
                     url=item.get("url", f"https://earn.superteam.fun/listings/{item.get('slug', '')}"),
                     skills=",".join(item.get("skills", [])) if isinstance(item.get("skills"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Superteam Earn fetch failed: %s", e)
 
     return prospects
@@ -470,7 +470,7 @@ async def _scan_gitcoin(query: str, category: str, max_results: int) -> list[dic
                     url=b.get("url", ""),
                     skills=",".join(b.get("keywords", [])) if isinstance(b.get("keywords"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Gitcoin fetch failed: %s", e)
 
     return prospects
@@ -506,7 +506,7 @@ async def _scan_dework(query: str, category: str, max_results: int) -> list[dict
                     url=task.get("permalink", ""),
                     skills=",".join(t.get("label", "") for t in task.get("tags", [])),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Dework fetch failed: %s", e)
 
     return prospects
@@ -540,7 +540,7 @@ async def _scan_layer3(query: str, category: str, max_results: int) -> list[dict
                     url=q.get("url", ""),
                     skills=",".join(q.get("tags", [])) if isinstance(q.get("tags"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Layer3 fetch failed: %s", e)
 
     return prospects
@@ -572,7 +572,7 @@ async def _scan_replit(query: str, category: str, max_results: int) -> list[dict
                     url=b.get("url", ""),
                     skills=",".join(b.get("tags", [])) if isinstance(b.get("tags"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Replit bounties fetch failed: %s", e)
 
     return prospects
@@ -605,7 +605,7 @@ async def _scan_zealy(query: str, category: str, max_results: int) -> list[dict]
                     budget_max=0,
                     url=c.get("url", f"https://zealy.io/c/{c.get('subdomain', '')}"),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Zealy fetch failed: %s", e)
 
     return prospects
@@ -639,7 +639,7 @@ async def _scan_galxe(query: str, category: str, max_results: int) -> list[dict]
                     budget_max=float(c.get("loyaltyPoints", 0) or 0),
                     url=f"https://galxe.com/campaign/{c.get('id', '')}",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Galxe fetch failed: %s", e)
 
     return prospects
@@ -673,7 +673,7 @@ async def _scan_questbook(query: str, category: str, max_results: int) -> list[d
                     budget_max=reward,
                     url=g.get("url", ""),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Questbook fetch failed: %s", e)
 
     return prospects
@@ -706,7 +706,7 @@ async def _scan_onlydust(query: str, category: str, max_results: int) -> list[di
                     url=p.get("htmlUrl", f"https://app.onlydust.com/p/{p.get('slug', '')}"),
                     skills=",".join(p.get("technologies", [])) if isinstance(p.get("technologies"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("OnlyDust fetch failed: %s", e)
 
     return prospects
@@ -737,7 +737,7 @@ async def _scan_freelancer(query: str, category: str, max_results: int) -> list[
                     url=f"https://www.freelancer.com/projects/{proj.get('seo_url', '')}",
                     skills=",".join(j.get("name", "") for j in proj.get("jobs", [])),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Freelancer.com fetch failed: %s", e)
 
     return prospects
@@ -764,7 +764,7 @@ async def _scan_fiverr(query: str, category: str, max_results: int) -> list[dict
                     budget_max=float(br.get("budget_max", br.get("budget", 0)) or 0),
                     url=br.get("url", ""),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Fiverr fetch failed: %s", e)
 
     return prospects
@@ -798,7 +798,7 @@ async def _scan_topcoder(query: str, category: str, max_results: int) -> list[di
                     url=f"https://www.topcoder.com/challenges/{ch.get('id', '')}",
                     skills=",".join(ch.get("tags", [])) if isinstance(ch.get("tags"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Topcoder fetch failed: %s", e)
 
     return prospects
@@ -832,7 +832,7 @@ async def _scan_hackerone(query: str, category: str, max_results: int) -> list[d
                     budget_max=float(bounty_range.get("max", 0) or 0),
                     url=attrs.get("url", f"https://hackerone.com/{attrs.get('handle', '')}"),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("HackerOne fetch failed: %s", e)
 
     return prospects
@@ -866,7 +866,7 @@ async def _scan_bugcrowd(query: str, category: str, max_results: int) -> list[di
                     budget_max=max_reward,
                     url=prog.get("url", f"https://bugcrowd.com/{prog.get('code', '')}"),
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Bugcrowd fetch failed: %s", e)
 
     return prospects
@@ -902,7 +902,7 @@ async def _scan_kaggle(query: str, category: str, max_results: int) -> list[dict
                     url=c.get("url", f"https://www.kaggle.com/competitions/{c.get('ref', '')}"),
                     skills=",".join(c.get("tags", [])) if isinstance(c.get("tags"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Kaggle fetch failed: %s", e)
 
     return prospects
@@ -934,7 +934,7 @@ async def _scan_issuehunt(query: str, category: str, max_results: int) -> list[d
                     url=issue.get("html_url", issue.get("url", "")),
                     skills=",".join(issue.get("labels", [])) if isinstance(issue.get("labels"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("IssueHunt fetch failed: %s", e)
 
     return prospects
@@ -966,7 +966,7 @@ async def _scan_algora(query: str, category: str, max_results: int) -> list[dict
                     url=b.get("url", b.get("html_url", "")),
                     skills=",".join(b.get("labels", [])) if isinstance(b.get("labels"), list) else "",
                 ))
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.warning("Algora fetch failed: %s", e)
 
     return prospects
@@ -1177,7 +1177,7 @@ async def evaluate_prospect(prospect_id: str):
                      prospect_id[:8], new_status, evaluation.get("quoted_price_usd", 0))
         return {"ok": 1, "status": new_status, "evaluation": evaluation}
 
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         await _update_status(prospect_id, "discovered")
         raise HTTPException(status_code=503, detail=f"Evaluator unreachable: {e}")
 
