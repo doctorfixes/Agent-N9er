@@ -74,6 +74,17 @@ FREELANCER_USER_ID = os.getenv("FREELANCER_USER_ID", "")
 FREELANCER_API_BASE = os.getenv("FREELANCER_API_BASE", "https://www.freelancer.com/api")
 FREELANCER_LIVE = bool(FREELANCER_OAUTH_TOKEN and FREELANCER_USER_ID)
 
+PORTFOLIO_URL = os.getenv("PORTFOLIO_URL", "")
+PLATFORM_TONE = {
+    "freelancer": "professional",
+    "upwork": "professional",
+    "github_bounties": "technical",
+    "algora": "technical",
+    "topcoder": "technical",
+    "fiverr": "friendly",
+    "onlydust": "technical",
+}
+
 PLATFORM_RATE_LIMITS = {
     "freelancer": int(os.getenv("FREELANCER_RATE_LIMIT_PER_MIN", "20")),
 }
@@ -512,27 +523,30 @@ async def _auto_apply_prospect(client: httpx.AsyncClient, prospect: dict, svc: d
         return {"ok": 0, "prospect_id": pid, "reason": "no_skill_match"}
 
     try:
+        platform = prospect.get("platform", "unknown")
         proposal_resp = await client.post(
             f"{EXECUTION_URL}/proposal",
             json={
                 "prospect_id": pid,
                 "title": prospect.get("title", ""),
                 "description": prospect.get("description", ""),
-                "platform": prospect.get("platform", "unknown"),
+                "platform": platform,
                 "budget_max": prospect.get("budget_max", 0) or prospect.get("quoted_price", 0),
                 "skills": prospect.get("skills", ""),
-                "tone": "professional",
+                "tone": PLATFORM_TONE.get(platform, "professional"),
             },
             headers=svc,
         )
         proposal_resp.raise_for_status()
         proposal_data = proposal_resp.json()
+        proposal_text = proposal_data.get("proposal", "")
+        if PORTFOLIO_URL:
+            proposal_text = f"{proposal_text}\n\nPortfolio: {PORTFOLIO_URL}"
 
         bid_result = {"ok": 0, "error": "not_freelancer"}
-        if prospect.get("platform") == "freelancer" and FREELANCER_LIVE:
+        if platform == "freelancer" and FREELANCER_LIVE:
             bid_result = await _freelancer_place_bid(
-                client, prospect,
-                proposal_data.get("proposal_text", proposal_data.get("text", "")),
+                client, prospect, proposal_text,
                 prospect.get("budget_max", 0) or prospect.get("quoted_price", 0),
             )
             if not bid_result.get("ok"):
