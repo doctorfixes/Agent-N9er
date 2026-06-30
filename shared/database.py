@@ -138,8 +138,6 @@ class _PostgresConnection:
 def _adapt_query(query: str, params: tuple) -> tuple:
     """Convert SQLite ?-style placeholders to PostgreSQL $N-style."""
     pg_query = query
-    for i in range(len(params), 0, -1):
-        pass
     parts = []
     idx = 1
     i = 0

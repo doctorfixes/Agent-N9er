@@ -643,15 +643,15 @@ async def get_bid_for_prospect(prospect_id: str):
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    freelancer_token_present = _freelancer_pat_configured()
+    freelancer_oauth = _freelancer_configured()
     return {
         "ok": 1,
         "service": "bid_service",
         "upwork_configured": bool(UPWORK_ACCESS_TOKEN or os.getenv("UPWORK_ACCESS_TOKEN")),
-        "freelancer_configured": bool(
-            FREELANCER_CLIENT_ID
-            and FREELANCER_CLIENT_SECRET
-            and (FREELANCER_ACCESS_TOKEN or os.getenv("FREELANCER_ACCESS_TOKEN"))
-        ),
+        "freelancer_configured": freelancer_token_present or freelancer_oauth,
+        "freelancer_pat": freelancer_token_present,
+        "freelancer_oauth_registered": freelancer_oauth,
         "execution_connected": bool(EXECUTION_URL),
         "prospector_connected": bool(PROSPECTOR_URL),
     }
@@ -705,9 +705,8 @@ def _freelancer_client_or_raise() -> FreelancerClient:
             status_code=400,
             detail=(
                 "Freelancer not configured. "
-                "Set FREELANCER_CLIENT_ID, FREELANCER_CLIENT_SECRET, "
-                "and FREELANCER_ACCESS_TOKEN env vars first. "
-                "Use /bid/freelancer/oauth/setup to kick off OAuth."
+                "Set FREELANCER_ACCESS_TOKEN env var first. "
+                "Use /bid/freelancer/oauth/setup for OAuth flow (requires CLIENT_ID/SECRET)."
             ),
         )
     return client
@@ -716,6 +715,10 @@ def _freelancer_client_or_raise() -> FreelancerClient:
 def _freelancer_configured() -> bool:
     """Check whether Freelancer credentials exist."""
     return bool(FREELANCER_CLIENT_ID and FREELANCER_CLIENT_SECRET)
+
+def _freelancer_pat_configured() -> bool:
+    """Check whether a Freelancer Personal Access Token exists (sufficient for all bid operations)."""
+    return bool(FREELANCER_ACCESS_TOKEN or os.getenv("FREELANCER_ACCESS_TOKEN"))
 
 
 @app.get("/bid/freelancer/oauth/setup")
