@@ -74,11 +74,35 @@ FREELANCER_USER_ID = os.getenv("FREELANCER_USER_ID", "")
 FREELANCER_API_BASE = os.getenv("FREELANCER_API_BASE", "https://www.freelancer.com/api")
 FREELANCER_LIVE = bool(FREELANCER_OAUTH_TOKEN and FREELANCER_USER_ID)
 
+PLATFORM_RATE_LIMITS = {
+    "freelancer": int(os.getenv("FREELANCER_RATE_LIMIT_PER_MIN", "20")),
+}
+_platform_call_log: dict = {}
+
+
+def _check_platform_rate_limit(platform: str) -> bool:
+    """Sliding-window limiter for outbound calls to a platform's API. Returns True if allowed."""
+    limit = PLATFORM_RATE_LIMITS.get(platform)
+    if limit is None:
+        return True
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - 60
+    calls = [t for t in _platform_call_log.get(platform, []) if t > cutoff]
+    if len(calls) >= limit:
+        _platform_call_log[platform] = calls
+        return False
+    calls.append(now)
+    _platform_call_log[platform] = calls
+    return True
+
 
 async def _freelancer_place_bid(client: httpx.AsyncClient, prospect: dict, proposal_text: str, amount: float) -> dict:
     """Place a real bid on Freelancer.com. Returns {ok, bid_id} or {ok: 0, error}."""
     if not FREELANCER_LIVE:
         return {"ok": 0, "error": "freelancer_not_configured"}
+    if not _check_platform_rate_limit("freelancer"):
+        logger.warning("Freelancer outbound rate limit hit, skipping bid for %s", prospect.get("id", "?")[:8])
+        return {"ok": 0, "error": "rate_limited"}
     try:
         resp = await client.post(
             f"{FREELANCER_API_BASE}/projects/0.1/bids/",
@@ -106,6 +130,9 @@ async def _freelancer_deliver(client: httpx.AsyncClient, prospect: dict, output_
     """Post the completed work to the Freelancer project thread. Returns {ok, ...}."""
     if not FREELANCER_LIVE:
         return {"ok": 0, "error": "freelancer_not_configured"}
+    if not _check_platform_rate_limit("freelancer"):
+        logger.warning("Freelancer outbound rate limit hit, skipping delivery for %s", prospect.get("id", "?")[:8])
+        return {"ok": 0, "error": "rate_limited"}
     try:
         project_id = prospect.get("job_id")
         resp = await client.post(
@@ -124,6 +151,66 @@ async def _freelancer_deliver(client: httpx.AsyncClient, prospect: dict, output_
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logger.warning("Freelancer delivery post failed for %s: %s", prospect.get("id", "?")[:8], e)
         return {"ok": 0, "error": str(e)}
+
+
+async def _freelancer_check_awarded(client: httpx.AsyncClient, prospect: dict) -> bool:
+    """Poll Freelancer for whether our bid on this project was awarded."""
+    if not FREELANCER_LIVE:
+        return False
+    if not _check_platform_rate_limit("freelancer"):
+        return False
+    project_id = prospect.get("job_id")
+    try:
+        resp = await client.get(
+            f"{FREELANCER_API_BASE}/projects/0.1/bids/",
+            headers={"freelancer-oauth-v1": FREELANCER_OAUTH_TOKEN},
+            params={"project_ids[]": project_id, "bidders[]": FREELANCER_USER_ID, "compact": "true"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        bids = (data.get("result") or {}).get("bids", [])
+        return any(b.get("award_status") == "awarded" for b in bids)
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer award check failed for %s: %s", prospect.get("id", "?")[:8], e)
+        return False
+
+
+async def _freelancer_check_messages(client: httpx.AsyncClient, prospect: dict) -> list[dict]:
+    """Fetch new client messages on a Freelancer project thread. Read-only — no auto-reply."""
+    if not FREELANCER_LIVE:
+        return []
+    if not _check_platform_rate_limit("freelancer"):
+        return []
+    project_id = prospect.get("job_id")
+    try:
+        resp = await client.get(
+            f"{FREELANCER_API_BASE}/projects/0.1/threads/",
+            headers={"freelancer-oauth-v1": FREELANCER_OAUTH_TOKEN},
+            params={"project_ids[]": project_id, "message_details": "true"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        threads = (data.get("result") or {}).get("threads", [])
+        messages = []
+        for t in threads:
+            for m in t.get("messages", []):
+                if str(m.get("from_user")) != str(FREELANCER_USER_ID):
+                    messages.append({
+                        "thread_id": t.get("id"),
+                        "from_user": m.get("from_user"),
+                        "message": m.get("message", ""),
+                        "time_created": m.get("time_created"),
+                    })
+        return messages
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning("Freelancer message check failed for %s: %s", prospect.get("id", "?")[:8], e)
+        return []
+
+
+_pending_messages: dict = {}
+
 
 app = FastAPI(title="Agent N9er Orchestrator")
 
@@ -304,6 +391,32 @@ async def _run_autonomous_cycle():
                     )
             except (httpx.RequestError, httpx.HTTPStatusError) as e:
                 logger.warning("Autonomous apply phase failed: %s", e)
+
+        # Phase 3.5: Poll Freelancer for award decisions and new client messages
+        # on prospects we've already bid on, instead of relying on manual status PATCHes.
+        if FREELANCER_LIVE:
+            try:
+                resp = await client.get(
+                    f"{PROSPECTOR_URL}/prospects",
+                    params={"status": "applied", "platform": "freelancer", "limit": MAX_PARALLEL_TASKS},
+                    headers=svc,
+                )
+                resp.raise_for_status()
+                applied = resp.json()
+                for p in applied[:MAX_PARALLEL_TASKS]:
+                    awarded = await _freelancer_check_awarded(client, p)
+                    if awarded:
+                        await client.patch(
+                            f"{PROSPECTOR_URL}/prospects/{p['id']}",
+                            json={"status": "hired"},
+                            headers=svc,
+                        )
+                        logger.info("Detected award for prospect %s via Freelancer API", p["id"][:8])
+                    msgs = await _freelancer_check_messages(client, p)
+                    if msgs:
+                        _pending_messages[p["id"]] = msgs
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.warning("Award/message polling phase failed: %s", e)
 
         # Phase 4: Execute work for hired prospects in parallel
         try:
@@ -1222,6 +1335,22 @@ async def pending_reviews():
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logger.warning("Failed to fetch pending reviews: %s", e)
         return []
+
+
+@app.get("/messages/pending")
+async def pending_messages():
+    """List new client messages discovered on bidded Freelancer projects, awaiting human reply."""
+    return [
+        {"prospect_id": pid, "messages": msgs}
+        for pid, msgs in _pending_messages.items()
+    ]
+
+
+@app.post("/messages/{prospect_id}/ack")
+async def ack_messages(prospect_id: str):
+    """Clear pending messages for a prospect once a human has handled them."""
+    _pending_messages.pop(prospect_id, None)
+    return {"ok": 1, "prospect_id": prospect_id}
 
 
 @app.post("/review/{prospect_id}")
