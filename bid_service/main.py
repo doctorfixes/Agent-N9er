@@ -22,7 +22,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+
+# Load .env before reading any env vars — keeps secrets out of shell history
+load_dotenv()
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -36,6 +40,12 @@ from shared.upwork_client import (
     ScoutingRequest,
     UserPlanResponse,
 )
+from shared.freelancer_client import (
+    FreelancerClient,
+    build_authorize_url,
+    exchange_code_for_token,
+    refresh_access_token,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -45,7 +55,14 @@ logger = logging.getLogger("bid_service")
 # Config
 # ---------------------------------------------------------------------------
 
-BID_DB_PATH = os.getenv("BID_DB_PATH", "/data/bid.db")
+# Docker mounts DB at /data/bid.db; local dev falls back to ./bid.db
+_default_db = "/data/bid.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    test_path = _default_db
+except PermissionError:
+    test_path = os.path.join(os.path.dirname(__file__), "bid.db")
+BID_DB_PATH = os.getenv("BID_DB_PATH", test_path)
 EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
 PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
@@ -57,6 +74,16 @@ UPWORK_ACCESS_TOKEN = os.getenv("UPWORK_ACCESS_TOKEN", "")
 UPWORK_REFRESH_TOKEN = os.getenv("UPWORK_REFRESH_TOKEN", "")
 UPWORK_API_URL = os.getenv("UPWORK_API_URL", "https://api.upwork.com/graphql")
 UPWORK_OAUTH_URL = os.getenv("UPWORK_OAUTH_URL", "https://www.upwork.com/services/api/oauth2/token")
+
+# Freelancer OAuth — set in .env or secrets_vault
+FREELANCER_CLIENT_ID = os.getenv("FREELANCER_CLIENT_ID", "")
+FREELANCER_CLIENT_SECRET = os.getenv("FREELANCER_CLIENT_SECRET", "")
+FREELANCER_ACCESS_TOKEN = os.getenv("FREELANCER_ACCESS_TOKEN", "")
+FREELANCER_REFRESH_TOKEN = os.getenv("FREELANCER_REFRESH_TOKEN", "")
+FREELANCER_REDIRECT_URI = os.getenv(
+    "FREELANCER_REDIRECT_URI",
+    "http://localhost:9400/bid/freelancer/oauth/callback",
+)
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -80,6 +107,46 @@ class OAuthTokenResponse(BaseModel):
     refresh_token: str = ""
     expires_in: int = 3600
     token_type: str = "Bearer"
+
+
+# ---------------------------------------------------------------------------
+# Freelancer-local models
+# ---------------------------------------------------------------------------
+
+
+class FreelancerOAuthTokenResponse(BaseModel):
+    """Freelancer OAuth token payload."""
+    access_token: str
+    refresh_token: str = ""
+    expires_in: int = 3600
+    token_type: str = "Bearer"
+
+
+class FreelancerBidRequest(BaseModel):
+    """Place a bid on a Freelancer project."""
+    project_id: str
+    bid_amount: float
+    description: str = ""
+    period: int = 14  # days
+    bid_type: str = "fixed"
+
+
+class FreelancerRawBidRequest(BaseModel):
+    """Submit a pre-written Freelancer bid (no generation)."""
+    project_id: str
+    bid_amount: float
+    description: str
+    period: int = 14
+    bid_type: str = "fixed"
+
+
+class FreelancerSearchRequest(BaseModel):
+    """Search Freelancer projects."""
+    keyword: str = ""
+    category: str = ""
+    budget_min: float = 0
+    budget_max: float = 0
+    limit: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +647,11 @@ async def health():
         "ok": 1,
         "service": "bid_service",
         "upwork_configured": bool(UPWORK_ACCESS_TOKEN or os.getenv("UPWORK_ACCESS_TOKEN")),
+        "freelancer_configured": bool(
+            FREELANCER_CLIENT_ID
+            and FREELANCER_CLIENT_SECRET
+            and (FREELANCER_ACCESS_TOKEN or os.getenv("FREELANCER_ACCESS_TOKEN"))
+        ),
         "execution_connected": bool(EXECUTION_URL),
         "prospector_connected": bool(PROSPECTOR_URL),
     }
@@ -610,6 +682,254 @@ async def get_upwork_job(job_key: str):
     client = _upwork_client()
     job = await client.get_job_details(job_key)
     return {"ok": 1, "job": job}
+
+
+# ---------------------------------------------------------------------------
+# Freelancer — OAuth
+# ---------------------------------------------------------------------------
+
+
+def _freelancer_client() -> FreelancerClient | None:
+    """Return a Freelancer client if a token is available, else None."""
+    token = FREELANCER_ACCESS_TOKEN or os.getenv("FREELANCER_ACCESS_TOKEN", "")
+    if not token:
+        return None
+    return FreelancerClient(access_token=token)
+
+
+def _freelancer_client_or_raise() -> FreelancerClient:
+    """Return a Freelancer client or raise 400 if unconfigured."""
+    client = _freelancer_client()
+    if client is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Freelancer not configured. "
+                "Set FREELANCER_CLIENT_ID, FREELANCER_CLIENT_SECRET, "
+                "and FREELANCER_ACCESS_TOKEN env vars first. "
+                "Use /bid/freelancer/oauth/setup to kick off OAuth."
+            ),
+        )
+    return client
+
+
+def _freelancer_configured() -> bool:
+    """Check whether Freelancer credentials exist."""
+    return bool(FREELANCER_CLIENT_ID and FREELANCER_CLIENT_SECRET)
+
+
+@app.get("/bid/freelancer/oauth/setup")
+async def freelancer_oauth_setup():
+    """Return the Freelancer OAuth authorize URL for the user to visit in a browser.
+
+    After authorising, Freelancer redirects to our callback endpoint.
+    """
+    if not _freelancer_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Set FREELANCER_CLIENT_ID and FREELANCER_CLIENT_SECRET env vars first.",
+        )
+
+    scopes = "basic,payment,projects,bids"
+    auth_url = build_authorize_url(
+        client_id=FREELANCER_CLIENT_ID,
+        redirect_uri=FREELANCER_REDIRECT_URI,
+        scope=scopes,
+    )
+    return {"authorize_url": auth_url}
+
+
+@app.get("/bid/freelancer/oauth/callback")
+async def freelancer_oauth_callback(code: str):
+    """OAuth callback — exchange code for access token.
+
+    Freelancer redirects here after the user authorizes. The code
+    is exchanged for an access + refresh token.
+    """
+    if not _freelancer_configured():
+        raise HTTPException(status_code=400, detail="Freelancer OAuth not configured.")
+
+    token_data = await exchange_code_for_token(
+        client_id=FREELANCER_CLIENT_ID,
+        client_secret=FREELANCER_CLIENT_SECRET,
+        code=code,
+        redirect_uri=FREELANCER_REDIRECT_URI,
+    )
+
+    return FreelancerOAuthTokenResponse(
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+        expires_in=token_data.get("expires_in", 3600),
+        token_type=token_data.get("token_type", "Bearer"),
+    )
+
+
+@app.post("/bid/freelancer/oauth/refresh")
+async def freelancer_oauth_refresh():
+    """Refresh the Freelancer access token using the stored refresh token."""
+    if not _freelancer_configured():
+        raise HTTPException(status_code=400, detail="Freelancer OAuth not configured.")
+    refresh = FREELANCER_REFRESH_TOKEN or os.getenv("FREELANCER_REFRESH_TOKEN")
+    if not refresh:
+        raise HTTPException(status_code=400, detail="No refresh token stored.")
+
+    token_data = await refresh_access_token(
+        client_id=FREELANCER_CLIENT_ID,
+        client_secret=FREELANCER_CLIENT_SECRET,
+        refresh_token=refresh,
+    )
+
+    return FreelancerOAuthTokenResponse(
+        access_token=token_data.get("access_token", ""),
+        refresh_token=token_data.get("refresh_token", ""),
+        expires_in=token_data.get("expires_in", 3600),
+        token_type=token_data.get("token_type", "Bearer"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Freelancer — bid submission
+# ---------------------------------------------------------------------------
+
+
+@app.post("/bid/freelancer/connect")
+async def freelancer_connect():
+    """Test that the Freelancer client can reach the API and return user info."""
+    client = _freelancer_client_or_raise()
+    try:
+        stats = await client.get_stats()
+        balance = await client.get_balance()
+        return {
+            "ok": 1,
+            "connected": True,
+            "user_id": stats.get("user_id"),
+            "username": stats.get("username"),
+            "balance": balance.get("available"),
+            "currency": balance.get("currency"),
+        }
+    except httpx.HTTPStatusError as e:
+        return {"ok": 0, "connected": False, "error": str(e)}
+
+
+@app.post("/bid/freelancer/submit")
+async def freelancer_submit(req: FreelancerBidRequest):
+    """Submit a bid to a Freelancer project.
+
+    Uses generated cover letter. For a pre-written version use
+    /bid/freelancer/raw-submit.
+    """
+    client = _freelancer_client_or_raise()
+    cover_letter = req.description or f"Placing bid on project {req.project_id}."
+    result = await client.submit_proposal(
+        job_id=req.project_id,
+        cover_letter=cover_letter,
+        bid_amount=req.bid_amount,
+        bid_type=req.bid_type,
+        estimated_duration=f"{req.period} days",
+    )
+    return {"ok": 1, "platform": "freelancer", "bid": result}
+
+
+@app.post("/bid/freelancer/raw-submit")
+async def freelancer_raw_submit(req: FreelancerRawBidRequest):
+    """Submit a pre-written bid to a Freelancer project (no LLM generation)."""
+    client = _freelancer_client_or_raise()
+    result = await client.submit_proposal(
+        job_id=req.project_id,
+        cover_letter=req.description,
+        bid_amount=req.bid_amount,
+        bid_type=req.bid_type,
+        estimated_duration=f"{req.period} days",
+    )
+    return {"ok": 1, "platform": "freelancer", "bid": result}
+
+
+@app.post(
+    "/bid/freelancer/{proposal_id}/withdraw",
+    response_model=UserPlanResponse,
+)
+async def freelancer_withdraw(proposal_id: str, reason: str = ""):
+    """Withdraw a pending Freelancer bid."""
+    client = _freelancer_client_or_raise()
+    result = await client.withdraw_proposal(proposal_id, reason)
+
+    async with aiosqlite.connect(BID_DB_PATH) as db:
+        await db.execute(
+            "UPDATE bids SET updated_at = ?, status = ?, platform = ? "
+            "WHERE proposal_id = ?",
+            (datetime.now(timezone.utc).isoformat(), "withdrawn", "freelancer", proposal_id),
+        )
+        await db.commit()
+
+    return UserPlanResponse(
+        action="withdrawn",
+        proposal_id=proposal_id,
+        proposal_status="withdrawn",
+        detail=f"Freelancer bid {proposal_id} withdrawn.",
+    )
+
+
+@app.post(
+    "/bid/freelancer/{proposal_id}/update",
+    response_model=UserPlanResponse,
+)
+async def freelancer_update(proposal_id: str, req: FreelancerBidRequest):
+    """Update an existing Freelancer bid."""
+    client = _freelancer_client_or_raise()
+    input_data = {
+        "amount": req.bid_amount,
+        "description": req.description,
+        "period": req.period,
+    }
+    result = await client.update_proposal(proposal_id, input_data)
+
+    async with aiosqlite.connect(BID_DB_PATH) as db:
+        await db.execute(
+            "UPDATE bids SET updated_at = ? WHERE proposal_id = ?",
+            (datetime.now(timezone.utc).isoformat(), proposal_id),
+        )
+        await db.commit()
+
+    return UserPlanResponse(
+        action="updated",
+        proposal_id=proposal_id,
+        proposal_status=result.get("status", "updated"),
+        detail=f"Freelancer bid {proposal_id} updated.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Freelancer — search & stats
+# ---------------------------------------------------------------------------
+
+
+@app.post("/bid/freelancer/search")
+async def freelancer_search(req: FreelancerSearchRequest):
+    """Search Freelancer projects."""
+    client = _freelancer_client_or_raise()
+    data = await client.search_jobs(
+        keyword=req.keyword or None,
+        category=req.category or None,
+        budget_min=req.budget_min or None,
+        budget_max=req.budget_max or None,
+        limit=min(req.limit, 50),
+    )
+    projects = data.get("projects", data) if isinstance(data, dict) else data
+    return {"ok": 1, "platform": "freelancer", "projects": projects}
+
+
+@app.get("/bid/freelancer/stats")
+async def freelancer_stats():
+    """Get Freelancer account stats and balance."""
+    client = _freelancer_client_or_raise()
+    stats = await client.get_stats()
+    balance = await client.get_balance()
+    return {
+        "ok": 1,
+        "platform": "freelancer",
+        "stats": stats,
+        "balance": balance,
+    }
 
 
 # ---------------------------------------------------------------------------

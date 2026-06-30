@@ -9,7 +9,9 @@ dist/
 build/
 .eggs/
 
-# virtual environments
+# environment / secrets
+.env
+.env.*
 .venv/
 venv/
 env/
