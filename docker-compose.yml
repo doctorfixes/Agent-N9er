@@ -32,6 +32,17 @@ services:
       - AUTO_SCAN_ENABLED=${AUTO_SCAN_ENABLED:-false}
       - SCAN_INTERVAL_SECONDS=${SCAN_INTERVAL_SECONDS:-3600}
       - SCAN_PLATFORMS=${SCAN_PLATFORMS:-upwork,github_bounties,freelancer,algora,topcoder}
+      - AUTONOMOUS_MODE=${AUTONOMOUS_MODE:-false}
+      - AUTONOMOUS_INTERVAL_SECONDS=${AUTONOMOUS_INTERVAL_SECONDS:-300}
+      - AUTO_APPLY_ENABLED=${AUTO_APPLY_ENABLED:-true}
+      - MAX_PARALLEL_TASKS=${MAX_PARALLEL_TASKS:-5}
+      - AGENT_CAPABILITIES=${AGENT_CAPABILITIES:-coding,writing,research,data_analysis,web_development,automation}
+      - MAX_DAILY_APPLICATIONS=${MAX_DAILY_APPLICATIONS:-50}
+      - REQUIRE_QUALITY_REVIEW=${REQUIRE_QUALITY_REVIEW:-true}
+      - MIN_QUALITY_SCORE=${MIN_QUALITY_SCORE:-0.6}
+      - FREELANCER_OAUTH_TOKEN=${FREELANCER_OAUTH_TOKEN:-}
+      - FREELANCER_USER_ID=${FREELANCER_USER_ID:-}
+      - PORTFOLIO_URL=${PORTFOLIO_URL:-}
       - ORCHESTRATOR_DB_PATH=/data/orchestrator.db
       - VERIXIO_ENV=${VERIXIO_ENV:-development}
       - CORS_ORIGINS=http://localhost:3000,http://dashboard:3000
@@ -101,6 +112,7 @@ services:
       - "8200:8200"
     environment:
       - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+      - BILLING_URL=http://billing:9200
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health')"]
       interval: 30s

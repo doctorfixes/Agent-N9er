@@ -3,3 +3,4 @@ uvicorn
 aiosqlite
 pydantic
 stripe
+httpx

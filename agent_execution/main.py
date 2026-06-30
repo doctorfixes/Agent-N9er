@@ -17,6 +17,9 @@ from shared.security import RequestIDMiddleware, ServiceTokenMiddleware, get_ser
 from shared.config import QUICK_TIMEOUT, CORS_ORIGINS
 from shared.retry import retry_request
 from shared.llm import complete, estimate_cost, has_available_provider, select_tier
+from shared.events import emit, EVENT_EXECUTION_COMPLETED, EVENT_EXECUTION_FAILED
+
+os.environ.setdefault("SERVICE_NAME", "execution")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("execution")
@@ -131,6 +134,16 @@ async def execute(request: ExecuteRequest):
         )
     except httpx.RequestError as e:
         logger.warning("Failed to update reputation after retries: %s", e)
+
+    event_type = EVENT_EXECUTION_COMPLETED if result["success"] else EVENT_EXECUTION_FAILED
+    await emit(event_type, {
+        "task_id": request.task_id,
+        "agent_id": request.agent_id,
+        "success": result["success"],
+        "duration": result.get("duration", 0),
+        "mode": result.get("mode", "unknown"),
+        "cost_usd": result.get("cost_usd", 0),
+    })
 
     return result
 

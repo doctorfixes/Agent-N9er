@@ -188,6 +188,64 @@ async def evaluate(req: EvaluateRequest) -> EvaluationResult:
     return result
 
 
+class OutputEvaluateRequest(BaseModel):
+    task_id: str
+    title: str = ""
+    description: str = ""
+    output_preview: str = ""
+
+
+@app.post("/evaluate-output")
+async def evaluate_output(req: OutputEvaluateRequest):
+    """Quick quality check on execution output before delivery."""
+    score = 0.0
+    issues = []
+
+    output = req.output_preview.strip()
+
+    # Length check - too short is suspicious
+    if len(output) < 50:
+        issues.append("output_too_short")
+    elif len(output) > 200:
+        score += 0.3
+    else:
+        score += 0.1
+
+    # Relevance check - does output reference the task?
+    title_words = set(req.title.lower().split())
+    output_words = set(output.lower().split())
+    overlap = title_words & output_words - {"a", "the", "is", "for", "and", "to", "of", "in", "i", "my"}
+    if len(overlap) >= 2:
+        score += 0.3
+    elif len(overlap) >= 1:
+        score += 0.15
+    else:
+        issues.append("low_relevance")
+
+    # Completeness check
+    if any(marker in output.lower() for marker in ["error", "failed", "cannot", "unable to", "i don't"]):
+        issues.append("possible_failure")
+        score -= 0.2
+
+    # Structure check - has formatting/sections
+    if any(c in output for c in ["#", "```", "- ", "1.", "**"]):
+        score += 0.2
+
+    # Substance check
+    if len(output.split()) > 50:
+        score += 0.2
+
+    score = round(max(0.0, min(1.0, score)), 2)
+    passed = score >= float(os.getenv("MIN_QUALITY_SCORE", "0.6"))
+
+    return {
+        "task_id": req.task_id,
+        "quality_score": score,
+        "passed": passed,
+        "issues": issues,
+    }
+
+
 async def _persist_evaluation(result: EvaluationResult, platform: str, title: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

@@ -13,6 +13,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.events import emit, EVENT_INVOICE_CREATED
+
+os.environ.setdefault("SERVICE_NAME", "billing")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("billing")
@@ -60,7 +63,7 @@ class PaymentUpdate(BaseModel):
     status: str
 
 
-VALID_STATUSES = {"draft", "sent", "paid", "failed", "refunded", "cancelled"}
+VALID_STATUSES = {"draft", "sent", "paid", "failed", "refunded", "cancelled", "disputed"}
 
 
 async def _init_db():
@@ -153,6 +156,14 @@ async def create_invoice(req: InvoiceRequest) -> InvoiceRecord:
         "Invoice %s created: $%.2f for %s (profit $%.2f)",
         invoice_id, req.amount_usd, req.prospect_id, profit,
     )
+
+    await emit(EVENT_INVOICE_CREATED, {
+        "invoice_id": invoice_id,
+        "prospect_id": req.prospect_id,
+        "amount_usd": req.amount_usd,
+        "profit_usd": profit,
+        "platform": req.platform,
+    })
 
     return InvoiceRecord(
         invoice_id=invoice_id, prospect_id=req.prospect_id,
@@ -249,6 +260,48 @@ async def update_invoice_status(invoice_id: str, update: PaymentUpdate):
     return {"ok": 1, "invoice_id": invoice_id, "status": update.status}
 
 
+class DisputeRequest(BaseModel):
+    reason: str
+    requested_refund_pct: float = Field(default=100.0, ge=0, le=100)
+
+
+@app.post("/invoices/{invoice_id}/dispute")
+async def dispute_invoice(invoice_id: str, dispute: DisputeRequest):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM invoices WHERE invoice_id = ?", (invoice_id,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+
+        invoice = dict(row)
+        if invoice["status"] == "refunded":
+            raise HTTPException(status_code=409, detail="Invoice already refunded")
+        if invoice["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Invoice already cancelled")
+
+        refund_amount = round(invoice["amount_usd"] * dispute.requested_refund_pct / 100, 2)
+        new_status = "refunded" if dispute.requested_refund_pct >= 100 else "disputed"
+
+        await db.execute(
+            "UPDATE invoices SET status = ? WHERE invoice_id = ?",
+            (new_status, invoice_id),
+        )
+        await _log_event(db, invoice_id, f"dispute_{new_status}", refund_amount)
+        await db.commit()
+
+    logger.info("Dispute on invoice %s: %s (refund $%.2f / %.0f%%)",
+                invoice_id, dispute.reason, refund_amount, dispute.requested_refund_pct)
+
+    return {
+        "ok": 1,
+        "invoice_id": invoice_id,
+        "status": new_status,
+        "refund_amount_usd": refund_amount,
+        "reason": dispute.reason,
+    }
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     if not stripe or not STRIPE_WEBHOOK_SECRET:
@@ -320,6 +373,34 @@ async def revenue_summary():
         "outstanding_usd": round(outstanding, 2),
         "profit_margin_pct": round((total_profit / total_revenue * 100) if total_revenue > 0 else 0, 1),
     }
+
+
+@app.get("/profitability")
+async def profitability_by_platform():
+    """Returns profit margins by platform so ranking can prioritize
+    the most profitable types of work."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT platform, COUNT(*) as jobs, "
+            "COALESCE(SUM(amount_usd), 0) as revenue, "
+            "COALESCE(SUM(token_cost_usd), 0) as cost, "
+            "COALESCE(SUM(profit_usd), 0) as profit, "
+            "COALESCE(AVG(profit_usd), 0) as avg_profit "
+            "FROM invoices GROUP BY platform ORDER BY profit DESC"
+        )
+        rows = await cursor.fetchall()
+        platforms = {}
+        for r in rows:
+            revenue = r[2]
+            platforms[r[0]] = {
+                "jobs": r[1],
+                "revenue_usd": round(revenue, 2),
+                "cost_usd": round(r[3], 4),
+                "profit_usd": round(r[4], 2),
+                "avg_profit_usd": round(r[5], 2),
+                "margin_pct": round((r[4] / revenue * 100) if revenue > 0 else 0, 1),
+            }
+        return platforms
 
 
 async def _log_event(db, invoice_id: str, event: str, amount: float):

@@ -11,6 +11,9 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.security import RequestIDMiddleware, ServiceTokenMiddleware
 from shared.config import CORS_ORIGINS
+from shared.events import emit, EVENT_REPUTATION_UPDATED
+
+os.environ.setdefault("SERVICE_NAME", "reputation")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("reputation")
@@ -170,6 +173,15 @@ async def update(record: UpdateRequest):
 
     entry = {"success": success, "fail": fail, "score": round(score, 4)}
     logger.info("Agent %s reputation: %.2f (W:%d L:%d)", record.agent_id, score, success, fail)
+
+    await emit(EVENT_REPUTATION_UPDATED, {
+        "agent_id": record.agent_id,
+        "score": round(score, 4),
+        "success_count": success,
+        "fail_count": fail,
+        "trend": "up" if record.success else "down",
+    })
+
     return {"ok": 1, "agent_id": record.agent_id, "reputation": entry}
 
 
