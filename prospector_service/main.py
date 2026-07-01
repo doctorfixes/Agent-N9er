@@ -7,7 +7,7 @@ import logging
 import smtplib
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -1184,7 +1184,7 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
         if timestamp_field:
             await db.execute(
                 f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
-                (update.status, datetime.now(datetime.UTC).isoformat(), prospect_id),
+                (update.status, datetime.now(timezone.utc).isoformat(), prospect_id),
             )
         else:
             await db.execute(
