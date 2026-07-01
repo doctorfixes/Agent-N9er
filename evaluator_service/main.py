@@ -17,7 +17,8 @@ from shared.llm import estimate_cost, select_tier, get_model_tiers, MARKUP_MULTI
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("evaluator")
 
-DB_PATH = os.getenv("EVALUATOR_DB_PATH", "/data/evaluator.db")
+DB_PATH = os.getenv("EVALUATOR_DB_PATH",
+                    os.path.join(os.path.dirname(__file__), "evaluator.db"))
 MINIMUM_QUOTE_USD = float(os.getenv("MINIMUM_QUOTE_USD", "5.00"))
 
 COMPLEXITY_SIGNALS = {

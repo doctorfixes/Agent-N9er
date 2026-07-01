@@ -43,8 +43,33 @@ export default function MissionControl() {
   const [ruleObjective, setRuleObjective] = useState("");
   const [ruleCategory, setRuleCategory] = useState("uncategorized");
   const [activity, setActivity] = useState([]);
+  const [agentEvents, setAgentEvents] = useState([]);
+  const [agentFeedConnected, setAgentFeedConnected] = useState(false);
   const activityRef = useRef(activity);
   activityRef.current = activity;
+
+  // Live agent feed via SSE
+  useEffect(() => {
+    const es = new EventSource("/api/agent-feed");
+    let buffer = [];
+
+    es.onopen = () => setAgentFeedConnected(true);
+    es.onerror = () => setAgentFeedConnected(false);
+
+    es.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data);
+        if (ev.type === "agent_registered" || ev.type === "agent_state_change" || ev.type === "agent_deregistered") {
+          addActivity(`${ev.type === "agent_registered" ? "+" : ev.type === "agent_deregistered" ? "✕" : "→"} ${ev.agent_id?.substring(0, 10)}`, ev.type === "agent_deregistered" ? "error" : "success");
+        }
+        buffer.push(ev);
+        if (buffer.length > 300) buffer = buffer.slice(-300);
+        setAgentEvents([...buffer]);
+      } catch {}
+    };
+
+    return () => es.close();
+  }, []);
 
   const { data: health } = useSWR("/api/health", fetcher, { refreshInterval: 15000 });
   const { data: tasks } = useSWR("/api/tasks", fetcher, { refreshInterval: 5000 });
@@ -289,6 +314,74 @@ export default function MissionControl() {
               Last scan: {new Date(scanState.last_scan_at).toLocaleString()}
             </div>
           )}
+        </Panel>
+      </div>
+
+      {/* Live Agent Feed Panel */}
+      <div className="cmd-grid main-layout" style={{ marginTop: 16 }}>
+        <Panel title="Live Agent Feed" dot={agentFeedConnected ? "" : "warn"} actions={
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: agentFeedConnected ? "var(--accent-green)" : "var(--accent-red)" }}>
+            {agentFeedConnected ? "SSE CONNECTED" : "DISCONNECTED"}
+          </span>
+        }>
+          <div style={{ maxHeight: 300, overflow: "auto", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+            {agentEvents.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 20, color: "var(--text-muted)" }}>
+                Awaiting agent events...
+              </div>
+            ) : (
+              agentEvents.slice(0, 100).map((ev, i) => {
+                const icon = ev.type === "agent_registered" ? "+"
+                  : ev.type === "agent_deregistered" ? "✕"
+                  : ev.type === "agent_state_change" ? "→"
+                  : ev.type === "agent_load_change" ? "⚡"
+                  : ev.type === "error" ? "!"
+                  : "•";
+                const color = ev.type === "agent_registered" ? "var(--accent-green)"
+                  : ev.type === "agent_deregistered" ? "var(--accent-red)"
+                  : ev.type === "agent_state_change" ? "var(--accent-cyan)"
+                  : ev.type === "agent_load_change" ? "var(--accent-amber)"
+                  : ev.type === "error" ? "var(--accent-red)"
+                  : "var(--text-muted)";
+                let msg = ev.type;
+                if (ev.type === "agent_registered") msg = `${ev.agent_id?.substring(0, 10)} registered [${ev.agent_type}]`;
+                else if (ev.type === "agent_deregistered") msg = `${ev.agent_id?.substring(0, 10)} left`;
+                else if (ev.type === "agent_state_change") msg = `${ev.agent_id?.substring(0, 10)} ${ev.old_state} → ${ev.new_state}`;
+                else if (ev.type === "agent_load_change") msg = `${ev.agent_id?.substring(0, 10)} load: ${ev.load}`;
+                else if (ev.type === "snapshot") msg = `${ev.agents?.length} agents online`;
+                else if (ev.type === "info") msg = ev.message;
+                else if (ev.type === "error") msg = ev.message;
+
+                return (
+                  <div key={i} style={{ display: "flex", gap: 6, padding: "3px 0", borderBottom: "1px solid rgba(30,45,74,0.15)" }}>
+                    <span style={{ color, minWidth: 12 }}>{icon}</span>
+                    <span style={{ color: "var(--text-muted)", minWidth: 48 }}>
+                      {ev.ts ? new Date(ev.ts).toLocaleTimeString("en-US", { hour12: false }) : ""}
+                    </span>
+                    <span style={{ color: "var(--text-secondary)" }}>{msg}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </Panel>
+        <Panel title="System Overview" dot="">
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid rgba(30,45,74,0.2)" }}>
+              <span style={{ color: "var(--text-muted)" }}>Agent Registry</span>
+              <span style={{ color: "var(--accent-cyan)" }}>:9900</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid rgba(30,45,74,0.2)" }}>
+              <span style={{ color: "var(--text-muted)" }}>SSE Feed</span>
+              <span style={{ color: agentFeedConnected ? "var(--accent-green)" : "var(--accent-red)" }}>
+                {agentFeedConnected ? "LIVE" : "IDLE"}
+              </span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+              <span style={{ color: "var(--text-muted)" }}>Feed Events</span>
+              <span style={{ color: "var(--text-primary)" }}>{agentEvents.length}</span>
+            </div>
+          </div>
         </Panel>
       </div>
     </div>

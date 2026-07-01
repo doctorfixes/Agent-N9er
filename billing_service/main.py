@@ -17,7 +17,8 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("billing")
 
-DB_PATH = os.getenv("BILLING_DB_PATH", "/data/billing.db")
+DB_PATH = os.getenv("BILLING_DB_PATH",
+                    os.path.join(os.path.dirname(__file__), "billing.db"))
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 

@@ -1,6 +1,23 @@
 version: "3.9"
 
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 64M
+    restart: unless-stopped
+
   orchestrator:
     build:
       context: .
@@ -17,6 +34,8 @@ services:
       - PROSPECTOR_URL=http://prospector:8900
       - EVALUATOR_URL=http://evaluator:8800
       - BILLING_URL=http://billing:9200
+      - REGISTRY_URL=http://agent-registry:9900
+      - REDIS_URL=redis://redis:6379/0
       - LLM_PROVIDER=${LLM_PROVIDER:-auto}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -40,6 +59,8 @@ services:
     volumes:
       - orchestrator-data:/data
     depends_on:
+      redis:
+        condition: service_healthy
       normalization-service:
         condition: service_healthy
       ranking-engine:
@@ -425,6 +446,75 @@ services:
           memory: 256M
     restart: unless-stopped
 
+  agent-registry:
+    build:
+      context: .
+      dockerfile: agent_registry/Dockerfile
+    ports:
+      - "9900:9900"
+    environment:
+      - REGISTRY_DB_PATH=/data/registry.db
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+      - HEARTBEAT_TTL_SECONDS=30
+    volumes:
+      - registry-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9900/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 128M
+    restart: unless-stopped
+
+  agent-launcher-bidder:
+    build:
+      context: .
+      dockerfile: agent_launcher/Dockerfile
+    ports:
+      - "9901:9901"
+    environment:
+      - REGISTRY_URL=http://agent-registry:9900
+      - BID_SERVICE_URL=http://bid_service:9400
+      - HEARTBEAT_INTERVAL=15
+      - AGENT_TYPE=bidder
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
+  agent-launcher-prospector:
+    build:
+      context: .
+      dockerfile: agent_launcher/Dockerfile
+    ports:
+      - "9902:9902"
+    environment:
+      - REGISTRY_URL=http://agent-registry:9900
+      - PROSPECTOR_URL=http://prospector:8900
+      - HEARTBEAT_INTERVAL=15
+      - AGENT_TYPE=prospector
+      - SERVICE_TOKEN=${SERVICE_TOKEN:-}
+    depends_on:
+      agent-registry:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+    restart: unless-stopped
+
   dashboard:
     build: ./dashboard
     ports:
@@ -443,6 +533,7 @@ services:
       - BILLING_URL=http://billing:9200
       - BROWSER_SERVICE_URL=http://browser-service:8001
       - ENTERPRISE_URL=http://enterprise-tools:9300
+      - REGISTRY_URL=http://agent-registry:9900
       - JWT_SECRET=${JWT_SECRET:-change-in-production}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS:-admin}
@@ -459,6 +550,8 @@ services:
       prospector:
         condition: service_healthy
       enterprise-tools:
+        condition: service_healthy
+      agent-registry:
         condition: service_healthy
     deploy:
       resources:
@@ -477,3 +570,4 @@ volumes:
   prospector-data:
   billing-data:
   enterprise-data:
+  registry-data:

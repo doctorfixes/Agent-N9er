@@ -5,7 +5,7 @@ const JWT_SECRET = new TextEncoder().encode(
   process.env.JWT_SECRET || "verixio-dev-secret-change-in-production"
 );
 
-const PUBLIC_PATHS = ["/login", "/api/auth", "/api/health"];
+const PUBLIC_PATHS = ["/login", "/api/auth", "/api/health", "/api/agent-feed"];
 
 const ROLE_HIERARCHY = { admin: 3, operator: 2, viewer: 1 };
 

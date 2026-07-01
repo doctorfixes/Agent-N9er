@@ -23,6 +23,8 @@ from shared.config import (
     CORS_ORIGINS,
 )
 from shared.retry import retry_post
+from shared.event_bus import EventBus
+from orchestrator.events import register_handlers
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("orchestrator")
@@ -59,6 +61,8 @@ app.add_middleware(
 registered_agents = {}
 _agents_lock = asyncio.Lock()
 _scan_task: asyncio.Task | None = None
+_event_bus: EventBus | None = None
+_event_bus_task: asyncio.Task | None = None
 _scan_state = {
     "running": False,
     "last_scan_at": None,
@@ -173,12 +177,16 @@ async def _run_scan_cycle():
 
 @asynccontextmanager
 async def lifespan(app):
-    global _scan_task
+    global _scan_task, _event_bus, _event_bus_task
     await _init_db()
     await _load_agents()
     if AUTO_SCAN_ENABLED:
         _scan_task = asyncio.create_task(_scan_loop())
         logger.info("Auto-scan enabled: interval=%ds, platforms=%s", SCAN_INTERVAL, SCAN_PLATFORMS)
+    # Initialize event bus
+    _event_bus = register_handlers(EventBus())
+    _event_bus_task = asyncio.create_task(_event_bus.start())
+    logger.info("EventBus initialized and listening")
     yield
     if _scan_task:
         _scan_task.cancel()
@@ -186,6 +194,10 @@ async def lifespan(app):
             await _scan_task
         except asyncio.CancelledError:
             pass
+    if _event_bus:
+        await _event_bus.stop()
+        if _event_bus_task:
+            _event_bus_task.cancel()
 
 
 def _svc_headers(request=None):
@@ -238,6 +250,15 @@ async def register_agent(agent: AgentRegisterRequest):
         pass
     logger.info("Registered agent %s (%s, specialization=%s)",
                 agent.agent_id, agent.profile, agent.specialization)
+    # Publish event
+    if _event_bus:
+        asyncio.ensure_future(_event_bus.publish("agent:registered", {
+            "agent_id": agent.agent_id,
+            "agent_type": agent.profile,
+            "specialization": agent.specialization,
+            "price_per_hour": agent.price,
+            "capabilities": [agent.profile, agent.specialization],
+        }))
     return {"ok": 1, "agent_id": agent.agent_id}
 
 

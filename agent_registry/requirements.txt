@@ -2,6 +2,4 @@ fastapi
 uvicorn
 httpx
 aiosqlite
-asyncpg
 pydantic
-redis

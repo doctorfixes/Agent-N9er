@@ -66,14 +66,14 @@ class TestOrchestratorConcurrency:
     async def test_concurrent_agent_registration(self, client):
         mock_client = _mock_reputation()
 
-        async def register(agent_id):
-            with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+            async def register(agent_id):
                 return await client.post(
                     "/agents/register",
                     json={"agent_id": agent_id, "profile": "test"},
                 )
 
-        results = await asyncio.gather(*[register(f"agent_{i}") for i in range(20)])
+            results = await asyncio.gather(*[register(f"agent_{i}") for i in range(20)])
 
         assert all(r.status_code == 200 for r in results)
         async with orch._agents_lock:
@@ -82,22 +82,22 @@ class TestOrchestratorConcurrency:
     async def test_concurrent_read_and_write(self, client):
         mock_client = _mock_reputation()
 
-        async def register(agent_id):
-            with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+        with patch.object(orch.httpx, "AsyncClient", return_value=mock_client):
+            async def register(agent_id):
                 return await client.post(
                     "/agents/register",
                     json={"agent_id": agent_id, "profile": "test"},
                 )
 
-        async def list_agents():
-            return await client.get("/agents")
+            async def list_agents():
+                return await client.get("/agents")
 
-        tasks = []
-        for i in range(10):
-            tasks.append(register(f"rw_agent_{i}"))
-            tasks.append(list_agents())
+            tasks = []
+            for i in range(10):
+                tasks.append(register(f"rw_agent_{i}"))
+                tasks.append(list_agents())
 
-        results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks)
         assert all(r.status_code == 200 for r in results)
 
 

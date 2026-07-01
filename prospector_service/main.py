@@ -24,7 +24,8 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("prospector")
 
-DB_PATH = os.getenv("PROSPECTOR_DB_PATH", "/data/prospector.db")
+DB_PATH = os.getenv("PROSPECTOR_DB_PATH",
+                    os.path.join(os.path.dirname(__file__), "prospector.db"))
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
 
@@ -1183,7 +1184,7 @@ async def update_prospect(prospect_id: str, update: ProspectUpdate):
         if timestamp_field:
             await db.execute(
                 f"UPDATE prospects SET status = ?, {timestamp_field} = ? WHERE id = ?",
-                (update.status, datetime.utcnow().isoformat(), prospect_id),
+                (update.status, datetime.now(datetime.UTC).isoformat(), prospect_id),
             )
         else:
             await db.execute(
