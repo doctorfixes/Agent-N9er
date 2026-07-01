@@ -301,3 +301,9 @@ async def generic_webhook(payload: dict):
     _log_signal(source, "generic", objective)
     result = await _forward_to_pipeline(task)
     return {"ok": 1, "event": "generic", "pipeline": result}
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("BROWSER_SERVICE_PORT", "8000"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

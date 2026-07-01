@@ -15,7 +15,13 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("reputation")
 
-DB_PATH = os.getenv("DB_PATH", "/data/reputation.db")
+_default_db = "/data/reputation.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    _safe_path = _default_db
+except PermissionError:
+    _safe_path = os.path.join(os.path.dirname(__file__), "reputation.db")
+DB_PATH = os.getenv("DB_PATH", _safe_path)
 
 
 class RegisterRequest(BaseModel):
@@ -262,3 +268,9 @@ async def get_agent(agent_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Agent not found")
     return _agent_to_dict(row)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("REPUTATION_PORT", "8500"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

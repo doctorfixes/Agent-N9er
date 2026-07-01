@@ -75,3 +75,9 @@ async def rank(task: dict):
         "tier": tier,
         "value_score": round(value_boost, 2),
     }
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("RANKING_PORT", "8200"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

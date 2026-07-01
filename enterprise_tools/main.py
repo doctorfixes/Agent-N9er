@@ -31,7 +31,13 @@ from shared.rbac import Role, has_permission, get_user_permissions, DEFAULT_USER
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("enterprise_tools")
 
-DB_PATH = os.getenv("ENTERPRISE_DB_PATH", "/data/enterprise.db")
+_default_db = "/data/enterprise.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    _safe_path = _default_db
+except PermissionError:
+    _safe_path = os.path.join(os.path.dirname(__file__), "enterprise.db")
+DB_PATH = os.getenv("ENTERPRISE_DB_PATH", _safe_path)
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 NORMALIZATION_URL = os.getenv("NORMALIZATION_URL", "http://localhost:8100")
@@ -642,3 +648,9 @@ async def system_overview():
         pass
 
     return overview
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("ENTERPRISE_TOOLS_PORT", "8401"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

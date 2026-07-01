@@ -70,3 +70,9 @@ async def normalize(task: dict):
 @app.get("/categories")
 async def get_categories(tier: str = None):
     return list_categories(tier)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("NORMALIZATION_PORT", "8100"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

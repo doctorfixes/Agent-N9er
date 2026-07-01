@@ -26,7 +26,7 @@ logger = logging.getLogger("prospector")
 
 DB_PATH = os.getenv("PROSPECTOR_DB_PATH",
                     os.path.join(os.path.dirname(__file__), "prospector.db"))
-EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
+EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8801")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "")

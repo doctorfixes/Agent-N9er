@@ -17,7 +17,13 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("marketplace")
 
-DB_PATH = os.getenv("DB_PATH", "/data/marketplace.db")
+_default_db = "/data/marketplace.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    _safe_path = _default_db
+except PermissionError:
+    _safe_path = os.path.join(os.path.dirname(__file__), "marketplace.db")
+DB_PATH = os.getenv("DB_PATH", _safe_path)
 
 
 class PublishRequest(BaseModel):
@@ -280,3 +286,9 @@ def _bid_from_row(row):
         "confidence": row["confidence"],
         "submitted_at": row["submitted_at"],
     }
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("MARKETPLACE_PORT", "8300"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

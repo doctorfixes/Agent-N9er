@@ -39,7 +39,13 @@ PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 EVALUATOR_URL = os.getenv("EVALUATOR_URL", "http://localhost:8800")
 BILLING_URL = os.getenv("BILLING_URL", "http://localhost:9200")
 
-DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", "/data/orchestrator.db")
+_default_db = "/data/orchestrator.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    _safe_path = _default_db
+except PermissionError:
+    _safe_path = os.path.join(os.path.dirname(__file__), "orchestrator.db")
+DB_PATH = os.getenv("ORCHESTRATOR_DB_PATH", _safe_path)
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "3600"))
 SCAN_PLATFORMS = os.getenv("SCAN_PLATFORMS", "upwork,github_bounties,freelancer,algora,topcoder").split(",")
@@ -578,3 +584,9 @@ async def revenue_pipeline(req: RevenuePipelineRequest):
         results["executed"], results["invoiced"], results["estimated_profit"],
     )
     return results
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("ORCHESTRATOR_PORT", "9000"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

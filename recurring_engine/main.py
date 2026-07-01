@@ -17,7 +17,13 @@ from shared.config import CORS_ORIGINS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("recurring")
 
-DB_PATH = os.getenv("RECURRING_DB_PATH", "/data/recurring.db")
+_default_db = "/data/recurring.db"
+try:
+    os.makedirs(os.path.dirname(_default_db), exist_ok=True)
+    _safe_path = _default_db
+except PermissionError:
+    _safe_path = os.path.join(os.path.dirname(__file__), "recurring.db")
+DB_PATH = os.getenv("RECURRING_DB_PATH", _safe_path)
 
 rules = []
 _rules_lock = asyncio.Lock()
@@ -132,3 +138,9 @@ async def tick():
 @app.get("/categories")
 async def categories():
     return list_categories()
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("RECURRING_PORT", "8600"))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -12,7 +12,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger("audit")
 
-AUDIT_DB_PATH = os.getenv("AUDIT_DB_PATH", "/data/audit.db")
+_default_audit_db = "/data/audit.db"
+try:
+    os.makedirs(os.path.dirname(_default_audit_db), exist_ok=True)
+    _safe_audit_path = _default_audit_db
+except PermissionError:
+    _safe_audit_path = os.path.join(os.path.dirname(__file__), "audit.db")
+AUDIT_DB_PATH = os.getenv("AUDIT_DB_PATH", _safe_audit_path)
 MAX_MEMORY_ENTRIES = 500
 
 _audit_log: deque = deque(maxlen=MAX_MEMORY_ENTRIES)
