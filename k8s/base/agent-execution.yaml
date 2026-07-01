@@ -21,7 +21,7 @@ spec:
         - name: agent-execution
           image: agent-n9er/agent-execution:latest
           ports:
-            - containerPort: 8400
+            - containerPort: 8700
           env:
             - name: DB_PATH
               value: /data/execution.db
@@ -43,13 +43,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: 8400
+              port: 8700
             initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /health
-              port: 8400
+              port: 8700
             initialDelaySeconds: 3
             periodSeconds: 10
       volumes:
@@ -66,5 +66,5 @@ spec:
   selector:
     app: agent-execution
   ports:
-    - port: 8400
-      targetPort: 8400
+    - port: 8700
+      targetPort: 8700

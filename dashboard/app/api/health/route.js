@@ -5,7 +5,7 @@ const SERVICES = {
   normalization: process.env.NORMALIZATION_URL || "http://localhost:8100",
   ranking: process.env.RANKING_URL || "http://localhost:8200",
   marketplace: process.env.MARKETPLACE_URL || "http://localhost:8300",
-  execution: process.env.EXECUTION_URL || "http://localhost:8400",
+  execution: process.env.EXECUTION_URL || "http://localhost:8700",
   reputation: process.env.REPUTATION_URL || "http://localhost:8500",
   recurring: process.env.RECURRING_URL || "http://localhost:8600",
   evaluator: process.env.EVALUATOR_URL || "http://localhost:8800",

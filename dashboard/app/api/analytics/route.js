@@ -1,4 +1,4 @@
-const EXECUTION_URL = process.env.EXECUTION_URL || "http://localhost:8400";
+const EXECUTION_URL = process.env.EXECUTION_URL || "http://localhost:8700";
 const SERVICE_TOKEN = process.env.SERVICE_TOKEN || "";
 
 export async function GET(request) {

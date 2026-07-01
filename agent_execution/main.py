@@ -539,3 +539,12 @@ def _format_html(output: str, task_id: str, row) -> str:
         f"<div class='content'><pre>{lines}</pre></div>"
         f"</div>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8700"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

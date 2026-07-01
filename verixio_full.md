@@ -6,7 +6,7 @@ services:
  normalization-service:{build:"./normalization_service",ports:["8100:8100"]}
  ranking-engine:{build:"./ranking_engine",ports:["8200:8200"]}
  bidding-marketplace:{build:"./bidding_marketplace",ports:["8300:8300"]}
- agent-execution:{build:"./agent_execution",ports:["8400:8400"]}
+ agent-execution:{build:"./agent_execution",ports:["8700:8700"]}
  reputation-ledger:{build:"./reputation_ledger",ports:["8500:8500"]}
  recurring-engine:{build:"./recurring_engine",ports:["8600:8600"]}
  browser-service:{build:"./browser_service",ports:["8001:8001"]}

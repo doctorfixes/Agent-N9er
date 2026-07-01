@@ -18,7 +18,7 @@ app = FastAPI(title="Agent N9er Simulation Engine")
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:9000")
 MARKETPLACE_URL = os.getenv("MARKETPLACE_URL", "http://localhost:8300")
-EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
+EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8700")
 REPUTATION_URL = os.getenv("REPUTATION_URL", "http://localhost:8500")
 
 

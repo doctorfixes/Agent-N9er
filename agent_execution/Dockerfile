@@ -7,6 +7,6 @@ COPY shared/ ./shared/
 COPY agent_execution/main.py .
 RUN mkdir -p /data && chown app:app /data
 USER app
-EXPOSE 8400
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8400/health')" || exit 1
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8400"]
+EXPOSE 8700
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8700/health')" || exit 1
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8700"]

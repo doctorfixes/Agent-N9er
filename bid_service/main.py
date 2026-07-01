@@ -63,7 +63,7 @@ try:
 except PermissionError:
     test_path = os.path.join(os.path.dirname(__file__), "bid.db")
 BID_DB_PATH = os.getenv("BID_DB_PATH", test_path)
-EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8400")
+EXECUTION_URL = os.getenv("EXECUTION_URL", "http://localhost:8700")
 PROSPECTOR_URL = os.getenv("PROSPECTOR_URL", "http://localhost:8900")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
 
@@ -932,6 +932,120 @@ async def freelancer_stats():
         "platform": "freelancer",
         "stats": stats,
         "balance": balance,
+    }
+
+
+class FreelancerPipelineRequest(BaseModel):
+    """Full pipeline: fetch prospect → LLM proposal → submit to Freelancer."""
+    prospect_id: str
+    bid_amount: float
+    period: int = 14  # days
+    bid_type: str = "fixed"
+    tone: str = "professional"
+
+
+@app.post("/bid/freelancer/pipeline")
+async def freelancer_pipeline(req: FreelancerPipelineRequest):
+    """Full pipeline: fetch prospect details → generate proposal via LLM → submit to Freelancer.
+
+    Mirrors /bid/upwork but uses Freelancer PAT. Requires:
+      - FREELANCER_ACCESS_TOKEN set in env
+      - EXECUTION_URL reachable (agent_execution on :8700)
+    """
+    import uuid
+
+    client = _freelancer_client_or_raise()
+
+    # 1. Fetch prospect from Prospector
+    async with httpx.AsyncClient(timeout=QUICK_TIMEOUT) as hc:
+        try:
+            p_resp = await hc.get(
+                f"{PROSPECTOR_URL}/prospects/{req.prospect_id}",
+                headers=_svc_headers(),
+            )
+            if p_resp.status_code != 200:
+                raise HTTPException(status_code=404,
+                                    detail=f"Prospect {req.prospect_id} not found")
+            prospect = p_resp.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"Prospector unreachable: {e}")
+
+    job_id = prospect.get("platform_job_id", "")
+    title = prospect.get("title", "Untitled Project")
+    description = prospect.get("description", "")
+    skills = prospect.get("skills", "")
+    budget_max = prospect.get("budget_max", 0)
+
+    # 2. Generate proposal via LLM (agent_execution)
+    proposal_text = ""
+    llm_cost = 0.0
+    llm_mode = "simulation"
+    async with httpx.AsyncClient(timeout=30) as hc:
+        try:
+            gen_resp = await hc.post(
+                f"{EXECUTION_URL}/proposal",
+                json={
+                    "prospect_id": req.prospect_id,
+                    "title": title,
+                    "description": description,
+                    "platform": "freelancer",
+                    "budget_max": budget_max,
+                    "skills": skills,
+                    "tone": req.tone,
+                },
+                headers=_svc_headers(),
+            )
+            if gen_resp.status_code == 200:
+                gen_data = gen_resp.json()
+                proposal_text = gen_data.get("proposal", "")
+                llm_cost = gen_data.get("cost_usd", 0)
+                llm_mode = gen_data.get("mode", "simulation")
+        except httpx.RequestError as e:
+            logger.warning("LLM proposal generation failed, using fallback: %s", e)
+
+    if not proposal_text:
+        proposal_text = (
+            f"Thank you for posting \"{title}\". I have relevant experience and am "
+            "confident I can deliver high-quality results efficiently. "
+            "Looking forward to discussing the details."
+        )
+
+    # 3. Submit to Freelancer
+    result = await client.submit_proposal(
+        job_id=job_id,
+        cover_letter=proposal_text,
+        bid_amount=req.bid_amount,
+        bid_type=req.bid_type,
+        estimated_duration=f"{req.period} days",
+    )
+
+    bid_id = str(uuid.uuid4())
+    proposal_id = str(result.get("bid", {}).get("id", ""))
+
+    # 4. Record in DB
+    async with aiosqlite.connect(BID_DB_PATH) as db:
+        await _record_bid(db, {
+            "id": bid_id,
+            "prospect_id": req.prospect_id,
+            "job_id": job_id,
+            "proposal_id": proposal_id,
+            "platform": "freelancer",
+            "bid_amount": req.bid_amount,
+            "bid_type": req.bid_type,
+            "cover_letter": proposal_text,
+            "status": "submitted",
+        })
+
+    return {
+        "ok": 1,
+        "platform": "freelancer",
+        "bid_id": bid_id,
+        "proposal_id": proposal_id,
+        "prospect_id": req.prospect_id,
+        "cover_letter": proposal_text,
+        "llm_mode": llm_mode,
+        "llm_cost_usd": llm_cost,
+        "bid": result,
     }
 
 

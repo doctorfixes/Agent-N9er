@@ -7,7 +7,7 @@ data:
   NORMALIZATION_URL: "http://normalization-service:8100"
   RANKING_URL: "http://ranking-engine:8200"
   MARKETPLACE_URL: "http://bidding-marketplace:8300"
-  EXECUTION_URL: "http://agent-execution:8400"
+  EXECUTION_URL: "http://agent-execution:8700"
   REPUTATION_URL: "http://reputation-ledger:8500"
   RECURRING_URL: "http://recurring-engine:8600"
   ORCHESTRATOR_URL: "http://orchestrator:9000"
